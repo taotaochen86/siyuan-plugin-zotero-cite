@@ -969,6 +969,30 @@ module.exports = class ZoteroCite extends Plugin {
     };
     document.addEventListener("keydown", this._escHandler, true);
 
+    /* 斜杠菜单：编辑器里敲 /zotero 直接调出插入面板
+       ⚠️ 思源没有 addProtyleSlash 方法，斜杠菜单是直接给 this.protyleSlash 赋值（数组），
+          protyle 输入 "/" 时遍历各插件的这个数组去匹配 filter。
+       ⚠️ 思源在调用 callback 前已把输入的 "/zotero" 删掉，这里不能再清理文本；
+          callback 收到的是当前编辑器实例，先记下来，openInsertDialog 才知道插到哪。 */
+    this.protyleSlash = [{
+      filter: ["/zotero"],
+      id: "zotero-cite-insert",
+      html: this.slashItemHtml(),
+      callback: (protyle) => {
+        if (protyle) {
+          this.curProtyle = protyle;
+          // 顺手锁住真实例：斜杠回传的可能是门面对象，getProtyle() 才有兜底可用
+          try {
+            const inst = (typeof protyle.getInstance === "function" && protyle.getInstance()) || protyle;
+            if (inst && inst.block && inst.block.rootID) {
+              this._realProtyle = inst;
+            }
+          } catch (e) { /* 忽略，交给 getProtyle 兜底 */ }
+        }
+        this.openInsertDialog();
+      },
+    }];
+
     /* 命令面板 */
     this.addCommand({
       langKey: "insertCite",
@@ -992,6 +1016,25 @@ module.exports = class ZoteroCite extends Plugin {
     });
 
     console.log("[zotero-cite] loaded");
+  }
+
+  /* 斜杠菜单条目的显示内容：跟随思源当前界面语言 */
+  slashItemHtml() {
+    let zh = true;
+    try {
+      const lang = window.siyuan && window.siyuan.config && window.siyuan.config.appearance
+        ? window.siyuan.config.appearance.lang
+        : "";
+      zh = String(lang || "").toLowerCase().indexOf("en") !== 0;
+    } catch (e) {
+      zh = true;
+    }
+    const text = zh ? "插入 Zotero 文献引用" : "Insert Zotero citation";
+    /* 纯常量，无用户输入，不需要转义 */
+    return '<div class="b3-list-item__first">'
+      + '<span class="b3-list-item__text">' + text + "</span>"
+      + '<span class="b3-list-item__meta">Zotero</span>'
+      + "</div>";
   }
 
   onunload() {
