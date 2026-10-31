@@ -972,19 +972,21 @@ module.exports = class ZoteroCite extends Plugin {
     /* 斜杠菜单：编辑器里敲 /zotero 直接调出插入面板
        ⚠️ 思源没有 addProtyleSlash 方法，斜杠菜单是直接给 this.protyleSlash 赋值（数组），
           protyle 输入 "/" 时遍历各插件的这个数组去匹配 filter。
-       ⚠️ 思源在调用 callback 前已把输入的 "/zotero" 删掉，这里不能再清理文本；
-          callback 收到的是当前编辑器实例，先记下来，openInsertDialog 才知道插到哪。 */
+       ⚠️ 思源在调用 callback 前已把输入的 "/zotero" 删掉，这里不能再清理文本。
+       ⚠️ callback 收到的对象不一定带 block.rootID（实测可能是个空壳），
+          直接赋值会把原本有效的 this.curProtyle 覆盖掉，导致 getDocId() 立刻返回 null、
+          弹出「请先在文档里点一下光标位置」。所以只在能取到 rootID 时才覆盖。 */
     this.protyleSlash = [{
       filter: ["/zotero"],
       id: "zotero-cite-insert",
       html: this.slashItemHtml(),
       callback: (protyle) => {
-        if (protyle) {
+        const rid = protyle && protyle.block && protyle.block.rootID;
+        if (rid) {
           this.curProtyle = protyle;
-          // 顺手锁住真实例：斜杠回传的可能是门面对象，getProtyle() 才有兜底可用
           try {
             const inst = (typeof protyle.getInstance === "function" && protyle.getInstance()) || protyle;
-            if (inst && inst.block && inst.block.rootID) {
+            if (inst && typeof inst.insert === "function") {
               this._realProtyle = inst;
             }
           } catch (e) { /* 忽略，交给 getProtyle 兜底 */ }
@@ -1182,7 +1184,9 @@ module.exports = class ZoteroCite extends Plugin {
         return cp;
       }
     }
-    if (this._realProtyle && this._realProtyle.block && this._realProtyle.block.rootID) {
+    /* 兜底：只要还能插入就交出去，不再强求 block.rootID ——
+       实测斜杠菜单回传的实例可能有 insert 却拿不到 block。 */
+    if (this._realProtyle && typeof this._realProtyle.insert === "function") {
       return this._realProtyle;
     }
     return null;
@@ -1196,9 +1200,22 @@ module.exports = class ZoteroCite extends Plugin {
     if (this.curProtyle && this.curProtyle.block && this.curProtyle.block.rootID) {
       return this.curProtyle.block.rootID;
     }
-    const w = document.querySelector(".protyle:not(.fn__none) .protyle-wysiwyg[data-node-id]");
-    if (w) {
-      return w.getAttribute("data-node-id");
+    /* ⚠️ 思源的 .protyle-wysiwyg 上并没有 data-node-id（取到的是 null），
+       文档 id 实际挂在 .protyle-title 上，这里必须走 title，否则活动编辑器取不到 id。 */
+    const act = document.querySelector(".protyle:not(.fn__none)") || document.querySelector(".protyle");
+    if (act) {
+      const t = act.querySelector(".protyle-title[data-node-id]");
+      if (t) {
+        return t.getAttribute("data-node-id");
+      }
+      const w = act.querySelector(".protyle-wysiwyg[data-node-id]");
+      if (w) {
+        return w.getAttribute("data-node-id");
+      }
+      const bg = act.querySelector(".protyle-background[data-node-id]");
+      if (bg) {
+        return bg.getAttribute("data-node-id");
+      }
     }
     return null;
   }
@@ -2328,19 +2345,20 @@ module.exports = class ZoteroCite extends Plugin {
     list.forEach((k) => {
       const raw = (rendered.bibByKey && rendered.bibByKey[k]) || "";
       let text = cslHtmlToMarkdown(raw);
-      // 数字式样式的条目自带 "[1] "，原样保留（这就是样式定义的样子）
-      const numbered = /^\[\d+\]\s/.test(text);
+      // 文末条目一律不加编号：数字式样式（IEEE / Nature / GB-T 7714）会在条目开头带 "[1] "，
+      // 这里剥掉；顺序仍按样式给出的引文序排列，与正文 [1][2] 自然对得上。
+      text = text.replace(/^\s*\[\s*\d+\s*\]\s*/, "");
       text = escapeLooseBrackets(text);
       // 文末条目的跳转链接带 ?bib=1，与正文引用区分（正文正则不含 ?，天然隔离）
       const jump = this.settings.linkEnabled
         ? " [↗](zotero://select/library/items/" + k + "?bib=1)"
         : "";
-      // ⚠️ 条目自带 "[1]" 时绝不能加 "- "：思源会把 "- [1]" 认成任务列表，
-      //    渲染成勾选框、导出成 "- [X]"。这类条目用独立段落，不加任何列表符号。
-      entries.push((numbered ? "" : "- ") + text + jump);
+      // ⚠️ 用纯段落，不用 "- " 列表：列表会渲染出项目符号（看起来像编号），
+      //    且条目以 "[1]" 开头时思源会误认成任务列表。
+      entries.push(text + jump);
     });
 
-    const body = [`## ${heading}`, ""].concat(entries.length ? entries : ["- （暂无引用）"]).join("\n\n");
+    const body = [`## ${heading}`, ""].concat(entries.length ? entries : ["（暂无引用）"]).join("\n\n");
     await fetchSyncPost("/api/block/appendBlock", {
       parentID: docId,
       dataType: "markdown",

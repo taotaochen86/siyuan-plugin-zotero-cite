@@ -1,6 +1,6 @@
 {
   "name": "siyuan-plugin-zotero-cite",
-  "version": "1.2.11",
+  "version": "1.2.12",
   "description": "Insert Zotero citations into SiYuan via the Zotero debug bridge, with CSL-accurate citation text and bibliography.",
   "license": "MIT",
   "author": "陈涛涛 (Taotao Chen)",
