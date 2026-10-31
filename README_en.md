@@ -1,5 +1,7 @@
 # Zotero Cite (SiYuan plugin)
 
+**English** | [简体中文](./README.md)
+
 Insert Zotero citations into SiYuan through the **Zotero Debug Bridge**. Zero build step, one CommonJS file.
 
 ![icon](icon.svg)

@@ -1,5 +1,7 @@
 # Zotero Cite（思源插件）
 
+**简体中文** | [English](./README_en.md)
+
 在思源笔记里通过 **Zotero Debug Bridge** 插入文献引用。零构建、纯 CommonJS 单文件。
 
 ![icon](icon.svg)
