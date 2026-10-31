@@ -1,0 +1,326 @@
+/* Zotero Cite for SiYuan */
+
+.zc-dlg {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.zc-dlg .zc-bar,
+.zc-dlg .zc-search,
+.zc-dlg .zc-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.zc-dlg .zc-bar label {
+  color: var(--b3-theme-on-surface);
+  opacity: .7;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.zc-dlg .zc-bar select {
+  max-width: 240px;
+}
+.zc-dlg .zc-list {
+  border: 1px solid var(--b3-border-color);
+  border-radius: var(--b3-border-radius);
+  padding: 4px;
+}
+.zc-dlg .zc-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 8px;
+  border-radius: var(--b3-border-radius-b);
+  cursor: pointer;
+}
+.zc-dlg .zc-item:hover {
+  background: var(--b3-list-hover);
+}
+.zc-dlg .zc-item .zc-cb {
+  margin-top: 4px;
+}
+.zc-dlg .zc-meta {
+  min-width: 0;
+}
+.zc-dlg .zc-title {
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.zc-dlg .zc-sub {
+  font-size: 12px;
+  opacity: .6;
+  margin-top: 2px;
+  word-break: break-word;
+}
+.zc-dlg .zc-empty {
+  padding: 18px 8px;
+  text-align: center;
+  opacity: .6;
+  font-size: 13px;
+}
+.zc-dlg .zc-foot {
+  justify-content: flex-end;
+  border-top: 1px solid var(--b3-border-color);
+  padding-top: 10px;
+}
+.zc-dlg .zc-foot .zc-tip {
+  margin-right: auto;
+  font-size: 12px;
+  opacity: .65;
+}
+
+/* 设置页 —— 一律「标签在上、控件占满整行」的纵向布局。
+   设置面板的可用宽度由思源窗口决定，做左右两列必然出现「左边太宽、右边太挤」，
+   所以不给 label 任何固定宽度，控件始终 100%。 */
+.zc-setting {
+  width: 100%;
+  box-sizing: border-box;
+}
+.zc-setting .zc-hint {
+  margin-bottom: 14px;
+  font-size: 12px;
+  line-height: 1.7;
+  opacity: .7;
+}
+.zc-setting .zc-hint code {
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--b3-theme-surface-lighter, rgba(128, 128, 128, .15));
+}
+.zc-setting .zc-set {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.zc-setting .zc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+}
+.zc-setting .zc-field__label {
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: .72;
+}
+.zc-setting .zc-field input,
+.zc-setting .zc-field select {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+.zc-setting .zc-field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.zc-setting .zc-field--inline .zc-field__label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.zc-setting .zc-field--inline input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 0;
+}
+.zc-setting .zc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+.zc-setting .zc-actions .b3-button {
+  margin: 0;
+  white-space: nowrap;
+}
+/* 旧类名保留，避免存量 DOM 变样 */
+.zc-setting .zc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 右键引用弹出的形态菜单 */
+.zc-menu {
+  position: fixed;
+  z-index: 99999;
+  min-width: 260px;
+  max-width: 340px;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--b3-theme-background);
+  border: 1px solid var(--b3-border-color);
+  box-shadow: var(--b3-dialog-shadow, 0 6px 24px rgba(0, 0, 0, .18));
+  font-size: 13px;
+  color: var(--b3-theme-on-background);
+  user-select: none;
+}
+.zc-menu__title {
+  padding: 6px 10px 8px;
+  font-size: 11px;
+  opacity: .6;
+}
+.zc-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.zc-menu__item:hover {
+  background: var(--b3-theme-surface-lighter, rgba(0, 0, 0, .06));
+}
+.zc-menu__item.is-active {
+  color: var(--b3-theme-primary);
+  font-weight: 600;
+}
+.zc-menu__item--danger:hover {
+  background: var(--b3-card-error-background, rgba(220, 60, 60, .12));
+  color: var(--b3-card-error-color, #d23f31);
+}
+.zc-menu__tick {
+  width: 14px;
+  flex: none;
+  text-align: center;
+  opacity: .8;
+}
+.zc-menu__sep {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--b3-border-color);
+}
+
+/* 右键菜单里的副标题 / 禁用态 */
+.zc-menu__sub {
+  display: block;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: .58;
+  margin-top: 2px;
+  white-space: normal;
+}
+.zc-menu__item.is-disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+.zc-menu__item.is-disabled:hover {
+  background: transparent;
+}
+
+/* 编辑引用 / 切换样式对话框 */
+.zc-edit__hint {
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: .72;
+  margin-bottom: 10px;
+}
+.zc-edit__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 300px;
+  overflow: auto;
+  margin-bottom: 10px;
+}
+.zc-item--off .zc-title,
+.zc-item--off .zc-sub {
+  opacity: .5;
+  text-decoration: line-through;
+}
+.zc-pick .zc-item.is-active {
+  background: var(--b3-theme-primary-lightest, rgba(0, 0, 0, .05));
+  border-radius: 6px;
+}
+.zc-pick .zc-item input[type="radio"] {
+  margin-top: 4px;
+  flex: none;
+}
+
+/* 「定位到文末参考文献」的短暂高亮 */
+.zc-bib-hit {
+  border-radius: 6px;
+  animation: zc-bib-flash 1.9s ease-out;
+}
+@keyframes zc-bib-flash {
+  0%   { background: rgba(255, 200, 0, .55); }
+  35%  { background: rgba(255, 200, 0, .38); }
+  100% { background: transparent; }
+}
+
+/* ============ 依赖说明块（设置页顶部） ============ */
+.zc-dep {
+  border: 1px solid rgba(188, 27, 20, .2);
+  background: rgba(188, 27, 20, .045);
+  border-radius: 10px;
+  padding: 12px 14px 10px;
+  margin-bottom: 14px;
+}
+.zc-dep__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.zc-dep__badge {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #BC1B14;
+  color: #fff;
+  letter-spacing: .02em;
+  flex: none;
+}
+.zc-dep__name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.zc-dep__must {
+  font-size: 11.5px;
+  color: #BC1B14;
+  margin-left: auto;
+  flex: none;
+}
+.zc-dep__text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: .84;
+  margin-bottom: 8px;
+}
+.zc-dep__steps {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.85;
+  opacity: .84;
+}
+.zc-dep__steps li {
+  margin-bottom: 2px;
+}
+.zc-dep__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.zc-dep__url {
+  font-size: 11px;
+  opacity: .58;
+  word-break: break-all;
+  background: rgba(0, 0, 0, .045);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.zc-dep code {
+  font-size: 11.5px;
+  background: rgba(0, 0, 0, .05);
+  padding: 1px 4px;
+  border-radius: 3px;
+}

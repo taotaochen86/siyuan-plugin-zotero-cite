@@ -1,0 +1,6 @@
+{
+  "insertCite": "插入 Zotero 文献引用",
+  "refreshCites": "重排全文 Zotero 引用",
+  "cycleCiteFormat": "切换光标处引用的形态",
+  "undoCite": "撤销上一次 Zotero 引用操作"
+}

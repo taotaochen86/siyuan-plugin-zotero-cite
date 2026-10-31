@@ -1,0 +1,28 @@
+{
+  "name": "siyuan-plugin-zotero-cite",
+  "version": "1.2.10",
+  "description": "Insert Zotero citations into SiYuan via the Zotero debug bridge, with CSL-accurate citation text and bibliography.",
+  "license": "MIT",
+  "author": "陈涛涛 (Taotao Chen)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/taotaochen86/siyuan-plugin-zotero-cite.git"
+  },
+  "bugs": {
+    "url": "https://github.com/taotaochen86/siyuan-plugin-zotero-cite/issues"
+  },
+  "keywords": [
+    "siyuan",
+    "plugin",
+    "zotero",
+    "citation",
+    "csl",
+    "bibliography"
+  ],
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "release": "bash scripts/release.sh",
+    "check": "bash scripts/preflight.sh",
+    "preflight": "bash scripts/preflight.sh"
+  }
+}

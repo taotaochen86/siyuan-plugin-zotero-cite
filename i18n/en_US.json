@@ -1,0 +1,6 @@
+{
+  "insertCite": "Insert Zotero citation",
+  "refreshCites": "Refresh all Zotero citations",
+  "cycleCiteFormat": "Cycle citation format at cursor",
+  "undoCite": "Undo last Zotero citation action"
+}
