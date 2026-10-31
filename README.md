@@ -8,7 +8,7 @@
 
 ## 先看这一条：本插件有外部依赖
 
-插件本身不读 Zotero 的数据库，它把代码发给 Zotero 里运行的 **Zotero Debug Bridge** 扩展，
+**需要 Zotero 10**，配 **Debug Bridge 1.2**。插件本身不读 Zotero 的数据库，它把代码发给 Zotero 里运行的 **Zotero Debug Bridge** 扩展，
 由那个扩展在 Zotero 内部执行，再把结果返回。**没有这个扩展，插件无法工作**——
 本地端口 23119 上根本不存在 `debug-bridge` 端点，所有请求都会失败。
 

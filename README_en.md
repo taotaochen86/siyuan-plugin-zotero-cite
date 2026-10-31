@@ -8,7 +8,7 @@ Insert Zotero citations into SiYuan through the **Zotero Debug Bridge**. Zero bu
 
 ## Read this first: the plugin has an external dependency
 
-The plugin does not read Zotero's database directly. It sends code to the **Zotero Debug Bridge** add-on running inside Zotero, which executes it in Zotero's own context and returns the result. **Without that add-on the plugin cannot work** — nothing is listening on `debug-bridge` at port 23119, so every request fails.
+**Requires Zotero 10**, with **Debug Bridge 1.2**. The plugin does not read Zotero's database directly. It sends code to the **Zotero Debug Bridge** add-on running inside Zotero, which executes it in Zotero's own context and returns the result. **Without that add-on the plugin cannot work** — nothing is listening on `debug-bridge` at port 23119, so every request fails.
 
 ### Install Debug Bridge (1.2)
 
