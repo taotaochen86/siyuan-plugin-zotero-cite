@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-zotero-cite",
   "author": "陈涛涛 (Taotao Chen)",
   "url": "https://github.com/taotaochen86/siyuan-plugin-zotero-cite",
-  "version": "1.2.12",
+  "version": "1.2.13",
   "minAppVersion": "3.1.0",
   "disabledInPublish": true,
   "backends": [
@@ -22,7 +22,7 @@
     "zh_CN": "通过 Zotero debug bridge 在思源里插入文献引用。正文文本严格按 CSL 样式输出；右键引用可改形态、编辑该处文献（可增可删）、切换全局 CSL 样式；文末自动生成参考文献表，点击引用跳回 Zotero。"
   },
   "readme": {
-    "default": "README.md",
+    "default": "README_en.md",
     "zh_CN": "README.md"
   },
   "icon": "icon.png",

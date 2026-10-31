@@ -58,6 +58,12 @@ for f in i18n/zh_CN.json i18n/en_US.json; do
     fi
 done
 
+# plugin.json 里声明的每个 readme 文件都必须真实存在，否则集市卡片会空着
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    [ -s "$f" ] && ok "readme $f" || bad "readme 声明的文件缺失：$f"
+done < <(node -e "const r=require('./plugin.json').readme||{};console.log([...new Set(Object.values(r))].join('\n'))")
+
 echo "== 5. 图标规格 =="
 node -e '
 const fs = require("fs");
