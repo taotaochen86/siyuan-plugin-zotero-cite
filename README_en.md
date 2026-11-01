@@ -99,7 +99,13 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | 6.4 Re-render all citations | Command palette: "重排全文 Zotero 引用" | Unbound |
 | 6.5 Cycle form at cursor | Command palette: "切换光标处引用的形态" | Unbound |
 | 6.6 Undo last citation action | Command palette: "撤销上一次 Zotero 引用操作" | `Ctrl+Alt+Z` (macOS: `⌥⌘Z`) |
-| 6.7 Edit / delete / add references | Right-click a citation → 5-item menu | — |
+| 6.7 Right-click · Default citation form | Right-click an in-text citation → item 1 | — |
+| 6.8 Right-click · Narrative (`Chen et al. (2026)`) | Right-click an in-text citation → item 2 (greyed out for numeric styles) | — |
+| 6.9 Right-click · Edit references… (add or remove) | Right-click an in-text citation → item 3, opens the editor | — |
+| 6.10 Right-click · Change document CSL style… | Right-click an in-text citation → item 4, opens the style picker | — |
+| 6.11 Right-click · Locate this entry in the bibliography | Right-click an in-text citation → item 5, scrolls to the entry and highlights it for 1.9 s | — |
+
+The right-click menu only works on **in-text citations**, and only affects the citation you clicked. The `[↗]` link on a bibliography entry does not open the menu — it is the jump-back-to-Zotero link. None of the menu items has a default shortcut; bind the matching commands in Settings → Keymap → Plugins if you want one.
 
 ## 7 Usage
 
