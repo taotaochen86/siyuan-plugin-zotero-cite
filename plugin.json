@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-zotero-cite",
   "author": "陈涛涛 (Taotao Chen)",
   "url": "https://github.com/taotaochen86/siyuan-plugin-zotero-cite",
-  "version": "1.2.14",
+  "version": "1.2.15",
   "minAppVersion": "3.1.0",
   "disabledInPublish": true,
   "backends": [
