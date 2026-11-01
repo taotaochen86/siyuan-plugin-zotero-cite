@@ -105,6 +105,7 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | 6.10 Right-click · Change document CSL style… | Right-click an in-text citation → item 4, opens the style picker | — |
 | 6.11 Right-click · Locate this entry in the bibliography | Right-click an in-text citation → item 5, scrolls to the entry and highlights it for 1.9 s | — |
 | 6.12 Right-click · Refresh Zotero citations in this document | Right-click an in-text citation → item 6, re-renders every citation and the bibliography with the current style | — |
+| 6.13 In-block right-click · Insert Zotero citation | Right-click inside any paragraph → "Insert Zotero citation", inserts the items currently selected in Zotero | — |
 
 The right-click menu only works on **in-text citations**, and only affects the citation you clicked. The `[↗]` link on a bibliography entry does not open the menu — it is the jump-back-to-Zotero link. None of the menu items has a default shortcut; bind the matching commands in Settings → Keymap → Plugins if you want one.
 

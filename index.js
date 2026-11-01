@@ -771,6 +771,87 @@ function scanCites(md, fallbackFmt) {
   return { keys, hits };
 }
 
+/* ===================== 原生右键菜单：把插件项放到一级菜单 ===================== */
+
+/** 菜单的 items 容器（思源的 Menu 实例 element 里有 .b3-menu__items） */
+function menuItemsRoot(menu) {
+  const el = menu && menu.element;
+  if (!el) {
+    return null;
+  }
+  try {
+    if (el.querySelector) {
+      const q = el.querySelector(".b3-menu__items");
+      if (q) {
+        return q;
+      }
+    }
+  } catch (e) { /* 退回 element */ }
+  return el;
+}
+
+/**
+ * 取「真正的主菜单」。
+ *
+ * ⚠️ 关键结论（思源前端 App 层的行为，别绕开）：
+ *    emit `open-menu-content` / `click-blockicon` 之前，思源会 new 一个 subMenu 顶替掉
+ *    `detail.menu`，等事件跑完再把这个 subMenu 整体挂成主菜单里的「插件 ›」子项。
+ *    所以凡是用 `detail.menu.addItem()` 加的项，**注定**进二级菜单 —— 调 index、加分隔线、
+ *    事后搬 DOM 都没用（搬 DOM 还会弄坏 MenuItem 的宿主，点完关不掉菜单）。
+ *
+ * 正路：主菜单实例仍挂在 `window.siyuan.menus.menu` 上，且 MenuItem 默认就挂它，
+ *       在它上面 addItem 既落在一级菜单，点完也能正常关闭。
+ */
+function mainMenuOf(menu) {
+  try {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const m = window.siyuan && window.siyuan.menus && window.siyuan.menus.menu;
+    if (!m || m === menu) {
+      return null;
+    }
+    if (typeof m.addItem !== "function" || !m.element) {
+      return null;
+    }
+    if (typeof m.element.querySelector !== "function") {
+      return null;
+    }
+    // 没有 items 容器说明还是初始化阶段的空壳，退回子菜单更安全
+    if (!m.element.querySelector(".b3-menu__items")) {
+      return null;
+    }
+    return m;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 把刚加进去的项搬到菜单最前面，并在其后补一条分隔线（思源块菜单有二十多项，追加在底部等于看不见） */
+function promoteMenuItems(menu, before) {
+  try {
+    const root = menuItemsRoot(menu);
+    if (!root || !root.children) {
+      return;
+    }
+    const kids = Array.prototype.slice.call(root.children);
+    if (kids.length <= before) {
+      return;
+    }
+    const fresh = kids.slice(before);
+    const anchor = root.firstChild;
+    for (const el of fresh) {
+      root.insertBefore(el, anchor);
+    }
+    const doc = root.ownerDocument || (root.parentNode && root.parentNode.ownerDocument);
+    if (doc && root.children.length > fresh.length) {
+      const sep = doc.createElement("div");
+      sep.className = "b3-menu__separator";
+      root.insertBefore(sep, fresh[fresh.length - 1].nextSibling);
+    }
+  } catch (e) { /* 排不上就保持原位，功能不受影响 */ }
+}
+
 /** 转义 markdown 链接文本里的方括号 */
 function escapeLinkText(s) {
   return String(s || "").replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
@@ -906,6 +987,9 @@ module.exports = class ZoteroCite extends Plugin {
     };
     this.eventBus.on("loaded-protyle-static", track);
     this.eventBus.on("switch-protyle", track);
+
+    /* 块内右键菜单 → 插入 Zotero 文献引用（与顶栏按钮、/zotero 等价） */
+    this.bindContentMenu();
 
     /* 拦截 zotero:// 链接点击，交给系统唤起 Zotero
        ⚠️ 思源的行内链接是 <span data-type="a" data-href="...">，没有 href 属性，
@@ -1254,9 +1338,15 @@ module.exports = class ZoteroCite extends Plugin {
     }
     // 与对话框路径一致：先把实例与光标存下来，插入时才有落点
     const protyle = this.getProtyle();
+    // 从右键菜单进来时用右键处的 range（它不属于 toolbar 的选区），用完即清
+    let range = protyle && protyle.toolbar ? protyle.toolbar.range : null;
+    if (this._ctxRange) {
+      range = this._ctxRange;
+      this._ctxRange = null;
+    }
     this._pending = {
       protyle,
-      range: protyle && protyle.toolbar ? protyle.toolbar.range : null,
+      range,
     };
     try {
       await this.insertCitation(keys, this.settings.defaultFormat);
@@ -1721,6 +1811,44 @@ module.exports = class ZoteroCite extends Plugin {
         }
       } catch (e) {
         showMessage(String(e.message || e), 8000);
+      }
+    });
+  }
+
+  /**
+   * 正文右键菜单里加「插入 Zotero 文献引用」。
+   *
+   * open-menu-content = 在块内文字上右键弹出的那个原生菜单（点块标那个入口是 click-blockicon）。
+   * ⚠️ 两个必须：
+   *   1) 菜单项要在同一个 tick 里加完，中间不能 await（菜单已经渲染了）；
+   *   2) 必须加在**主菜单实例**上，不能用 detail.menu —— 那是思源临时造的子菜单，
+   *      事件结束后会整体挂成「插件 ›」，用户得点两下才看得见（见 mainMenuOf 里的说明）。
+   */
+  bindContentMenu() {
+    this.eventBus.on("open-menu-content", (e) => {
+      const d = (e && e.detail) || {};
+      if (!d.menu) {
+        return;
+      }
+      try {
+        const host = mainMenuOf(d.menu) || d.menu;
+        const root = menuItemsRoot(host);
+        const before = root && root.children ? root.children.length : 0;
+        host.addItem({
+          icon: "iconLink",
+          label: "插入 Zotero 文献引用",
+          click: () => {
+            // 右键落点优先于「当前激活的标签页」：多标签时可能不是同一个文档
+            if (d.protyle) {
+              this.curProtyle = d.protyle;
+            }
+            this._ctxRange = d.range || null;
+            this.insertFromSelection();
+          },
+        });
+        promoteMenuItems(host, before);
+      } catch (err) {
+        /* 菜单 API 若改版，最多少这一项，不影响插入/右键引用等主功能 */
       }
     });
   }
