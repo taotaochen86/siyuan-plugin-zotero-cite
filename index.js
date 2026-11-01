@@ -771,6 +771,73 @@ function scanCites(md, fallbackFmt) {
   return { keys, hits };
 }
 
+/**
+ * 把一段文本里的引用链接按「紧挨着」分组。
+ *
+ * 为什么需要：用户经常连着插两条，得到 `(Yuan et al., 2020)(Frederick, 2023)` ——
+ * 两个独立链接、各渲染各的。正确写法是一个 cluster：`(Yuan et al., 2020; Frederick, 2023)`。
+ * 只在中间**什么都没有**（空白/零宽字符）时才合并，中间有文字的一律不动。
+ *
+ * 返回 [{start, end, keys, items}]，keys 已去重且保持出现顺序（决定文末顺序）。
+ */
+function groupCites(text, fallbackFmt) {
+  const src = String(text || "");
+  const hits = [];
+  CITE_RE.lastIndex = 0;
+  let m;
+  while ((m = CITE_RE.exec(src)) !== null) {
+    // 文末条目的 [↗] 回跳链接带 ?bib=1，不是正文引用
+    if (parseQuery(m[3]).bib === "1") {
+      continue;
+    }
+    hits.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      text: m[1],
+      keys: citeKeysOf(m[2], m[3]),
+      fmt: fmtOfQuery(m[3], fallbackFmt),
+    });
+  }
+  CITE_RE.lastIndex = 0;
+  const groups = [];
+  for (const h of hits) {
+    const prev = groups[groups.length - 1];
+    const gap = prev ? src.slice(prev.end, h.start) : null;
+    /*
+     * ⚠️ 只认同「同一行内的空白」。不能写成 \s —— \s 包含换行，
+     *    那样全文导出时机上把**相邻两块**的引用当成一组合并，而逐块改写时块内只有单条，
+     *    渲染结果里查不到这个组合，正文就会变成 `[?]`（实测踩过）。
+     */
+    if (prev && /^[ \t\u200b\u200c\u200d]*$/.test(gap)) {
+      prev.end = h.end;
+      prev.items.push(h);
+      const seen = new Set(prev.keys);
+      for (const k of h.keys) {
+        if (!seen.has(k)) {
+          seen.add(k);
+          prev.keys.push(k);
+        }
+      }
+    } else {
+      groups.push({ start: h.start, end: h.end, keys: h.keys.slice(), items: [h] });
+    }
+  }
+  return groups;
+}
+
+/** 按 groupCites 的结果重写文本：每一组交给 renderGroup(group) 生成新文本；返回 null 表示这组保持原样 */
+function rewriteCites(text, groups, renderGroup) {
+  let out = "";
+  let last = 0;
+  for (const g of groups) {
+    out += text.slice(last, g.start);
+    const rep = renderGroup(g);
+    out += rep == null ? text.slice(g.start, g.end) : rep;
+    last = g.end;
+  }
+  return out + text.slice(last);
+}
+
 /* ===================== 原生右键菜单：把插件项放到一级菜单 ===================== */
 
 /** 菜单的 items 容器（思源的 Menu 实例 element 里有 .b3-menu__items） */
@@ -1290,7 +1357,12 @@ module.exports = class ZoteroCite extends Plugin {
       return this.curProtyle.block.rootID;
     }
     /* ⚠️ 思源的 .protyle-wysiwyg 上并没有 data-node-id（取到的是 null），
-       文档 id 实际挂在 .protyle-title 上，这里必须走 title，否则活动编辑器取不到 id。 */
+       文档 id 实际挂在 .protyle-title 上，这里必须走 title，否则活动编辑器取不到 id。
+       ⚠️ 再套一层 typeof document 判断：非浏览器环境（脚本化调用、单测）里没有 document，
+          不加这层会直接抛 ReferenceError，把整条调用链打断。 */
+    if (typeof document === "undefined" || !document.querySelector) {
+      return null;
+    }
     const act = document.querySelector(".protyle:not(.fn__none)") || document.querySelector(".protyle");
     if (act) {
       const t = act.querySelector(".protyle-title[data-node-id]");
@@ -2418,16 +2490,79 @@ module.exports = class ZoteroCite extends Plugin {
       return { updated: 0 };
     }
 
-    // 2. 把每处引用当成一个 cluster，按正文顺序交给 CSL 渲染。
+    // 2. 先把候选块全部读进来（渲染与改写共用这一份）。
+    //    ⚠️ 顺序很重要：clusters 必须同时覆盖「全文分组」和「每块分组」。
+    //       只按全文分组会漏 —— 全文导出与块内 kramdown 在换行/零宽字符上不完全一致，
+    //       一旦块内分组结果不在 clusters 里，渲染取不到，正文就会变成 `[?]`。
+    const rows = await this.querySql(
+      `SELECT id FROM blocks WHERE root_id='${docId}' AND type IN ('p','h','l','i','b','s','t') ORDER BY sort`
+    );
+    /*
+     * ⚠️ 文末参考文献块必须排除在「改写」之外。
+     * 它们稍后会被 rebuildBibliography 整段删掉重建，如果这里也改写、也进撤销快照：
+     *   · 每次重排都白写一遍（表现为 always updated N）；
+     *   · 撤销时拿已被删除的块 id 去写，每块报一次 "block not found"，满屏提示。
+     */
+    const bibIds = new Set();
+    try {
+      const chResp = await fetchSyncPost("/api/block/getChildBlocks", { id: docId });
+      const kids = (chResp && chResp.data) || [];
+      const bibHeading = this.settings.bibHeading || "参考文献";
+      let hAt = -1;
+      kids.forEach((c, i) => {
+        if (c && c.type === "h" && String(c.content || "").indexOf(bibHeading) >= 0) {
+          hAt = i;
+        }
+      });
+      if (hAt >= 0) {
+        kids.slice(hAt).forEach((c) => bibIds.add(c.id));
+      }
+    } catch (e) { /* 取不到就按没有文末处理 */ }
+
+    const blocks = [];
+    {
+      // 并发读：串行读 300 块要 0.7 秒以上，分批并发后每批只有一次往返的延迟
+      const batch = 20;
+      for (let i = 0; i < rows.length; i += batch) {
+        const slice = rows.slice(i, i + batch).filter((row) => !bibIds.has(row.id));
+        const got = await Promise.all(slice.map((row) =>
+          fetchSyncPost("/api/block/getBlockKramdown", { id: row.id }).catch(() => null)
+        ));
+        got.forEach((r, j) => {
+          const row = slice[j];
+          if (!row || !r) {
+            return;
+          }
+          const kdRaw = r.data && r.data.kramdown;
+          // 先合并历史残留（可能有多份叠加），再剥上标外壳，最后按当前样式重建
+          const kd = kdRaw ? collapseCiteMarkup(unwrapCiteSups(kdRaw)) : kdRaw;
+          if (!kd || !/zotero:\/\/select\/library\/items\//.test(kd)) {
+            return;
+          }
+          blocks.push({ id: row.id, kdRaw: kdRaw, kd: kd });
+        });
+      }
+    }
+
+    // 3. 每处引用算一个 cluster，按正文顺序交给 CSL 渲染。
     //    文本完全由样式决定，插件不拼括号、不算编号；链接结构不动（仍是 ?zkeys=&f=）。
+    //    ⚠️ 紧挨着的多条引用算**一个** cluster：用户连着插两条得到 `(A, 2020)(B, 2023)`，
+    //       应该被合成 `(A, 2020; B, 2023)`，而不是两个各自独立的括号。
+    const fullMasked = maskCode(fullMd).s;
+    const groups = groupCites(fullMasked, this.settings.defaultFormat);
     const clusters = [];
     const seenCluster = new Set();
-    scan.hits.forEach((h) => {
-      const ck = h.keys.join("|");
-      if (!seenCluster.has(ck)) {
-        seenCluster.add(ck);
-        clusters.push(h.keys);
+    const pushCluster = (keys) => {
+      const ck = keys.join("|");
+      if (!ck || seenCluster.has(ck)) {
+        return;
       }
+      seenCluster.add(ck);
+      clusters.push(keys);
+    };
+    groups.forEach((g) => pushCluster(g.keys));
+    blocks.forEach((b) => {
+      groupCites(maskCode(b.kd).s, this.settings.defaultFormat).forEach((g) => pushCluster(g.keys));
     });
     const rendered = await zoteroExec(this.settings, buildRenderScript({
       keys: scan.keys,
@@ -2450,78 +2585,49 @@ module.exports = class ZoteroCite extends Plugin {
     const citeParts = (keys, fmtId) => {
       const rec = (rendered.cites && rendered.cites[keys.join("|")]) || null;
       if (!rec) {
-        return { html: "[?]", wholeSup: false };
+        // 渲染结果里没有这个组合：宁可这一处不动，也不能写成 [?]（会把正文写坏）
+        return null;
       }
       const wantNarr = normFmt(fmtId) === "narr";
       const narrText = wantNarr ? joinNarrParts(rec.np) : null;
-      const raw = narrText || rec.c || "[?]";
+      const raw = narrText || rec.c;
+      if (!raw) {
+        return null;
+      }
       const inner = isWholeSup(raw);
       return inner !== null
         ? { html: inner, wholeSup: true }
         : { html: raw, wholeSup: false };
     };
 
-    /** 生成一处引用的最终 markdown（必要时外层加 <sup>） */
+    /** 生成一处引用的最终 markdown（必要时外层加 <sup>）；渲染不出来返回 null，调用方保留原文 */
     const renderCite = (keys, fmtId) => {
       const cp = citeParts(keys, fmtId);
-      const link = makeCiteLink(cslHtmlToMarkdown(cp.html) || "[?]", keys, this.settings, fmtId);
+      if (!cp) {
+        return null;
+      }
+      const link = makeCiteLink(cslHtmlToMarkdown(cp.html), keys, this.settings, fmtId);
       return cp.wholeSup ? "<sup>" + link + "</sup>" : link;
     };
 
-    // 3. 逐块改写正文里的引用链接（每处按自己的 ?f= 渲染）
-    const rows = await this.querySql(
-      `SELECT id FROM blocks WHERE root_id='${docId}' AND type IN ('p','h','l','i','b','s','t') ORDER BY sort`
-    );
+    // 4. 逐块改写正文里的引用链接（每处按自己的 ?f= 渲染；块内容已在第 2 步读好）
     let updated = 0;
     let skipped = 0;
-    /*
-     * ⚠️ 文末参考文献块必须排除在「改写」之外。
-     * 它们稍后会被 rebuildBibliography 整段删掉重建，如果这里也改写、也进撤销快照：
-     *   · 每次重排都白写一遍（表现为 always updated N）；
-     *   · 撤销时拿已被删除的块 id 去写，每块报一次 "block not found"，满屏提示。
-     */
-    const bibIds = new Set();
-    try {
-      const chResp = await fetchSyncPost("/api/block/getChildBlocks", { id: docId });
-      const kids = (chResp && chResp.data) || [];
-      const bibHeading = this.settings.bibHeading || "参考文献";
-      let hAt = -1;
-      kids.forEach((c, i) => {
-        if (c && c.type === "h" && String(c.content || "").indexOf(bibHeading) >= 0) {
-          hAt = i;
-        }
-      });
-      if (hAt >= 0) {
-        kids.slice(hAt).forEach((c) => bibIds.add(c.id));
-      }
-    } catch (e) { /* 取不到就按没有文末处理 */ }
     /* 两阶段：先算出所有要改的块，再统一记一次撤销帧，最后才落盘。
        这样「一次重排」= 撤销栈里的一步，Ctrl+Alt+Z 一按整批回滚。 */
     const todo = [];
-    for (const row of rows) {
-      if (bibIds.has(row.id)) {
-        continue;
-      }
-      const r = await fetchSyncPost("/api/block/getBlockKramdown", { id: row.id });
-      const kdRaw = r && r.data && r.data.kramdown;
-      // 先合并历史残留（可能有多份叠加），再剥上标外壳，最后按当前样式重建
-      const kd = kdRaw ? collapseCiteMarkup(unwrapCiteSups(kdRaw)) : kdRaw;
-      if (!kd || !/zotero:\/\/select\/library\/items\//.test(kd)) {
-        continue;
-      }
-      const mk = maskCode(kd);
-      const masked = mk.s.replace(CITE_RE, (full, text, kMain, query) => {
-        // 文末条目的跳转链接原样保留，别当正文引用改写
-        if (parseQuery(query).bib === "1") {
-          return full;
-        }
-        const ks = citeKeysOf(kMain, query);
-        let fmtId = fmtOfQuery(query, this.settings.defaultFormat);
+    for (const b of blocks) {
+      const kdRaw = b.kdRaw;
+      const mk = maskCode(b.kd);
+      // 紧挨着的多条引用合并成一处再渲染（`(A)(B)` → `(A; B)`）
+      const gs = groupCites(mk.s, this.settings.defaultFormat);
+      const masked = rewriteCites(mk.s, gs, (g) => {
+        let fmtId = g.items[0].fmt;
         // 换成数字式样式后，原来的 narr 标记已无意义 → 顺手改回 csl，避免脏数据
         if (!narrable && fmtId === "narr") {
           fmtId = "csl";
         }
-        return renderCite(ks, fmtId);
+        return renderCite(g.keys, fmtId);
       });
       // ⚠️ 写盘前必须剥掉块属性：kramdown 的属性是紧贴正文的，按 markdown 写回去
       //    有可能被当成正文，用户就会看到 `…(2020)}{: id="…" updated="…"}`。
@@ -2531,7 +2637,7 @@ module.exports = class ZoteroCite extends Plugin {
       //   2) 块属性已经脏了 —— 剥离后新旧会一模一样，光比内容永远判不出来，
       //      必须强制写一次把残留的 `{: id="…"}` 从正文里清掉
       if (out !== canonicalContent(kdRaw) || attrsAreDirty(kdRaw)) {
-        todo.push({ id: row.id, oldKd: kdRaw, next: out });
+        todo.push({ id: b.id, oldKd: kdRaw, next: out });
       }
     }
     if (todo.length) {
@@ -2596,12 +2702,12 @@ module.exports = class ZoteroCite extends Plugin {
         break;
       }
     }
-    if (idx >= 0) {
-      // 从后往前删，避免影响兄弟节点
-      for (let i = children.length - 1; i >= idx; i--) {
-        await fetchSyncPost("/api/block/deleteBlock", { id: children[i].id });
-      }
-    }
+    /*
+     * ⚠️ 以前这里是「全删重建」：把标题之后的块逐个 deleteBlock，再一坨 appendBlock。
+     *    实测 300 条文献时这一步要 14.7 秒（300 次删除调用），而且内容没变也照删照建。
+     *    现在改成增量：内容一致就一个字都不写；有差异才 update / 删多余 / 补缺失。
+     */
+    const oldEntries = idx >= 0 ? children.slice(idx + 1) : [];
 
     // 组装条目：顺序直接用样式给出的 bibOrder（作者年=字母序，数字式=引用序）
     const entries = [];
@@ -2652,12 +2758,96 @@ module.exports = class ZoteroCite extends Plugin {
       entries.push(text + jump);
     });
 
-    const body = [`## ${heading}`, ""].concat(entries.length ? entries : ["（暂无引用）"]).join("\n\n");
+    const finalEntries = entries.length ? entries : ["（暂无引用）"];
+
+    /* 没有文末：整段追加（标题 + 条目） */
+    if (idx < 0) {
+      await fetchSyncPost("/api/block/appendBlock", {
+        parentID: docId,
+        dataType: "markdown",
+        data: [`## ${heading}`, ""].concat(finalEntries).join("\n\n"),
+      });
+      return;
+    }
+
+    /*
+     * 比对方式：**内容指纹**，不逐块读。
+     *   · 逐块 getBlockKramdown 读 300 条 → 5 秒；
+     *   · 一次 SQL `id IN (...)` 读 → 0 行（刚写入的块还没进索引）；
+     *   · 指纹存在文档属性里，读一次属性就能判断"要不要动"，常态 0 写入。
+     * 指纹不同才真正重建；重建时删除并发、插入一次批量，不做逐条调用。
+     */
+    const hashOf = (arr) => {
+      const s = arr.join("\u0001");
+      let h = 5381;
+      for (let i = 0; i < s.length; i++) {
+        h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+      }
+      return h.toString(36) + "-" + s.length;
+    };
+    const myHash = hashOf(finalEntries);
+    let prevHash = "";
+    try {
+      const a = await fetchSyncPost("/api/attr/getBlockAttrs", { id: docId });
+      prevHash = (a && a.data && a.data["custom-zotero-bibhash"]) || "";
+    } catch (e) { /* 读不到就当作要重建 */ }
+    if (idx >= 0 && prevHash === myHash && oldEntries.length === finalEntries.length) {
+      return;   // 内容没变：一个字都不写（幂等刷新到此为止）
+    }
+
+    /*
+     * 真的变了：删旧的 + 一次批量插入。
+     * ⚠️ 删除必须走事务：逐块 deleteBlock 300 次实测 14.7 秒（并发也没用，内核内部仍然串行）。
+     *    改用 /api/transactions 一次提交 100 个 delete，实测 10 块 49ms。
+     *    事务不可用（版本差异/被禁用）时自动退回逐块删，功能不受影响。
+     */
+    if (idx >= 0 && oldEntries.length) {
+      const batch = 100;
+      for (let i = 0; i < oldEntries.length; i += batch) {
+        const ops = oldEntries.slice(i, i + batch).map((c) => ({ action: "delete", id: c.id }));
+        let okTx = false;
+        try {
+          const r = await fetchSyncPost("/api/transactions", {
+            transactions: [{ doOperations: ops }],
+            reqId: Date.now() + i,
+          });
+          okTx = !!(r && r.code === 0);
+        } catch (e) {
+          okTx = false;
+        }
+        if (!okTx) {
+          for (const op of ops) {
+            await fetchSyncPost("/api/block/deleteBlock", { id: op.id }).catch(() => null);
+          }
+        }
+      }
+      // 事务偶尔会留下最后一块（文档不允许整块清空），补一遍
+      try {
+        const left = (await fetchSyncPost("/api/block/getChildBlocks", { id: docId })).data || [];
+        let at2 = -1;
+        left.forEach((c, i) => {
+          if (c && c.type === "h" && String(c.content || "").indexOf(heading) >= 0) {
+            at2 = i;
+          }
+        });
+        if (at2 >= 0 && left.length > at2 + 1) {
+          for (const c of left.slice(at2 + 1)) {
+            await fetchSyncPost("/api/block/deleteBlock", { id: c.id }).catch(() => null);
+          }
+        }
+      } catch (e) { /* 补删失败不影响主流程 */ }
+    }
     await fetchSyncPost("/api/block/appendBlock", {
       parentID: docId,
       dataType: "markdown",
-      data: body,
+      data: (idx >= 0 ? finalEntries : [`## ${heading}`, ""].concat(finalEntries)).join("\n\n"),
     });
+    try {
+      await fetchSyncPost("/api/attr/setBlockAttrs", {
+        id: docId,
+        attrs: { "custom-zotero-bibhash": myHash },
+      });
+    } catch (e) { /* 属性写失败只影响下次比对精度 */ }
   }
 
   async querySql(stmt) {
