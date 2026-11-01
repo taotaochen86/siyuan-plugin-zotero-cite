@@ -1062,9 +1062,15 @@ module.exports = class ZoteroCite extends Plugin {
        ⚠️ 思源的行内链接是 <span data-type="a" data-href="...">，没有 href 属性，
           所以不能用 a[href^="zotero://"] 选择器，否则永远选不中。 */
     this._linkHandler = (ev) => {
-      const el = ev.target && ev.target.closest
-        ? ev.target.closest('[data-href^="zotero://"], a[href^="zotero://"]')
-        : null;
+      /*
+       * ⚠️ 只拦**本插件自己生成的引用链接**（zotero://select/library/items/…）。
+       *    以前写的是 `[data-href^="zotero://"]`，把所有 zotero:// 链接一网打尽 ——
+       *    结果 Zotero 的批注回跳链接 `zotero://open-pdf/library/items/KEY?page=1&annotation=XXX`
+       *    也被吞掉：preventDefault + stopPropagation 之后只调了 openInZotero（仅选中条目），
+       *    PDF 页码与批注定位全丢了。别的 zotero 集成插件也被 stopPropagation 挡死。
+       */
+      const SEL = '[data-href^="zotero://select/library/items/"], a[href^="zotero://select/library/items/"]';
+      const el = ev.target && ev.target.closest ? ev.target.closest(SEL) : null;
       if (!el) {
         return;
       }
@@ -1261,6 +1267,13 @@ module.exports = class ZoteroCite extends Plugin {
   }
 
   async openInZotero(href) {
+    /*
+     * 防线二：只处理引用链接。批注回跳（zotero://open-pdf/…?annotation=…）这类绝不能
+     * 走到这里 —— 这里只会「选中条目」，会把页码和批注定位弄丢，必须交给系统默认处理。
+     */
+    if (!/^zotero:\/\/select\/library\/items\//.test(String(href || ""))) {
+      return;
+    }
     const now = Date.now();
     if (now - (this._lastOpen || 0) < 600) {
       return; // 防连点：600ms 内只处理一次，避免重复唤起
