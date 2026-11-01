@@ -28,6 +28,11 @@ const DEFAULT_SETTINGS = {
   styleId: "http://www.zotero.org/styles/apa",
   defaultFormat: "csl",
   bibHeading: "参考文献",
+  // 文末文献列表的编号样式。
+  //   ""      → 跟随 CSL 样式自带的编号（IEEE 出 [1]、Nature 出 1.、作者年式本来就没有）
+  //   "none"  → 不显示编号
+  //   其它    → 当作模板覆盖，`{n}` 是序号占位符，如 "{n}. " / "[{n}] " / "【{n}】"
+  bibNumber: "",
   linkEnabled: true,
 };
 
@@ -1661,7 +1666,10 @@ module.exports = class ZoteroCite extends Plugin {
       `<div class="zc-menu__item" data-act="edit"><span class="zc-menu__tick">✎</span><span>编辑文献引用…（可增可删）</span></div>` +
       `<div class="zc-menu__item" data-act="style"><span class="zc-menu__tick">≡</span><span>切换全局默认 CSL 样式…</span></div>` +
       `<div class="zc-menu__sep"></div>` +
-      `<div class="zc-menu__item" data-act="locate"><span class="zc-menu__tick">↓</span><span>定位到文末参考文献中的这条</span></div>`;
+      `<div class="zc-menu__item" data-act="locate"><span class="zc-menu__tick">↓</span><span>定位到文末参考文献中的这条</span></div>` +
+      `<div class="zc-menu__sep"></div>` +
+      `<div class="zc-menu__item" data-act="refresh"><span class="zc-menu__tick">↻</span><span>刷新本篇 Zotero 引用` +
+        `<span class="zc-menu__sub">按当前样式重排正文与文末</span></span></div>`;
     document.body.appendChild(menu);
 
     // 贴边内收，避免弹出到屏幕外。放在下一帧量尺寸，否则刚插入还没布局，宽度是 0
@@ -1702,6 +1710,10 @@ module.exports = class ZoteroCite extends Plugin {
           } else if (n > 1) {
             showMessage(`已标出文末对应的 ${n} 条文献`, 2500);
           }
+        } else if (act === "refresh") {
+          // 整篇重排：只在这一处点，但重排的是这篇文档（正文全部引用 + 文末）
+          showMessage("正在按当前样式重排本篇…", 2000);
+          await this.refreshDocument(true, (anchor && anchor.docId) || undefined);
         } else if (act === "open") {
           await this.openInZotero(href);
         } else if (act === "remove") {
@@ -1720,14 +1732,99 @@ module.exports = class ZoteroCite extends Plugin {
     this._menuEl = null;
   }
 
+  /**
+   * 切换某一处引用的形态（默认格式 ↔ 叙述式）。
+   *
+   * ⚠️ 只改这一块，**不重建文末列表、不重写其他引用块**。
+   *    以前这里改完就调 refreshDocument 整篇重排：导出全文 → 逐块读 → 逐块写 →
+   *    删掉并重建整个文末参考文献。改一个字的显示形态却把全文重写一遍，文档一大就卡。
+   *    形态只影响这一处的显示文本，条目集合没变，文末列表与别的引用都不需要动。
+   *
+   * 常态**不读全文**：只把这一处交给 Zotero 渲染一次，改这一块，结束。
+   * 唯一的例外：当前样式是数字式（IEEE / Nature / GB/T 7714 这类），正文显示的是
+   * 编号，而编号由 CSL 按全文引用顺序分配 —— 单独送渲染只会得到 [1]。
+   * 所以只有「渲染结果看起来就是个编号」时，才补一次全文顺序重算，仍只写这一块。
+   */
   async setCiteFormat(anchor, fmtId) {
     const fmt = normFmt(fmtId);
-    const res = await this.patchCiteAt(anchor, () => ({ fmt }));
-    if (!res.changed) {
-      throw new Error("没找到匹配的引用链接（可能内容刚被改动过），请刷新文档后再试");
+    const keys = parseCiteKeys((anchor && anchor.href) || "");
+    if (!keys.length) {
+      throw new Error("没读到这处引用的文献条目，请重新点开文档再试");
     }
-    await new Promise(r => setTimeout(r, 400));
-    await this.refreshDocument(false, (anchor && anchor.docId) || undefined);
+
+    // 与整篇重排共用同一把串行锁，避免两条路径交叉写同一块
+    const prevLock = this._refreshLock || Promise.resolve();
+    let release;
+    const myLock = new Promise((r) => { release = r; });
+    this._refreshLock = prevLock.then(() => myLock);
+    await prevLock;
+    try {
+      // 第一步：只渲染这一处
+      let rendered = await zoteroExec(this.settings, buildRenderScript({
+        keys,
+        clusters: [keys],
+        styleId: this.settings.styleId,
+      }));
+      let rec = (rendered.cites && rendered.cites[keys.join("|")]) || null;
+
+      // 数字式特征：渲染出来就是一串编号（[1] / <sup>1</sup> / (1)），没有作者年文本
+      const looksNumeric = !!rec && !(rec.np && rec.np.length) &&
+        /^[\s<]*[\[(（]?\s*(<sup>)?\s*\d/.test(String(rec.c || ""));
+      if (looksNumeric) {
+        const docId = (anchor && anchor.docId) || this.getDocId();
+        if (docId) {
+          const mdResp = await fetchSyncPost("/api/export/exportMdContent", { id: docId });
+          const fullMd = (mdResp && mdResp.data && mdResp.data.content) || "";
+          const scan = scanCites(maskCode(fullMd).s, this.settings.defaultFormat);
+          if (scan.keys.length) {
+            const seen = new Set();
+            const list = [];
+            scan.hits.forEach((h) => {
+              const ck = h.keys.join("|");
+              if (!seen.has(ck)) {
+                seen.add(ck);
+                list.push(h.keys);
+              }
+            });
+            // 锚点可能是刚被改过的旧块，兜底把目标这处补进顺序里
+            if (!seen.has(keys.join("|"))) {
+              list.push(keys);
+            }
+            rendered = await zoteroExec(this.settings, buildRenderScript({
+              keys: scan.keys.concat(keys.filter(k => scan.keys.indexOf(k) < 0)),
+              clusters: list,
+              styleId: this.settings.styleId,
+            }));
+            rec = (rendered.cites && rendered.cites[keys.join("|")]) || rec;
+          }
+        }
+      }
+
+      const narrable = rendered.narrativeSupported !== false;
+      this._lastRendered = {
+        narrativeSupported: narrable,
+        styleTitle: (rendered.style && rendered.style.title) || null,
+      };
+      if (fmt === "narr" && !narrable) {
+        throw new Error("当前是数字式样式，没有叙述式写法");
+      }
+
+      if (!rec) {
+        throw new Error("没拿到 CSL 渲染结果（这几篇文献可能已从 Zotero 删除）");
+      }
+      const text = fmt === "narr" ? joinNarrParts(rec.np) : cslHtmlToMarkdown(rec.c);
+      if (!text) {
+        throw new Error("样式没有给出这一处的显示文本");
+      }
+
+      // 只写这一块：patchCiteAt 自带单块撤销快照
+      const res = await this.patchCiteAt(anchor, () => ({ text, fmt }));
+      if (!res.changed) {
+        throw new Error("没找到匹配的引用链接（可能内容刚被改动过），请刷新文档后再试");
+      }
+    } finally {
+      release();
+    }
   }
 
   /** 编辑这处引用：勾选保留的条目、从 Zotero 追加、搜索添加 */
@@ -2383,13 +2480,40 @@ module.exports = class ZoteroCite extends Plugin {
     const set = new Set(keys);
     let list = (rendered.bibOrder || []).filter(k => set.has(k));
     keys.forEach(k => { if (!list.includes(k)) list.push(k); });
+
+    /*
+     * 编号归属：本来由 CSL 样式自己决定（数字式出 [1] / 1.，作者年式没有编号）。
+     * 设置项只有三种意图：
+     *   ""     → 跟随 CSL（保留样式给出的前缀）
+     *   "none" → 关掉编号（剥掉前缀）
+     *   其它   → 用用户的模板覆盖（先剥掉 CSL 前缀，再按顺序自己编号）
+     */
+    const rawNum = String(this.settings.bibNumber || "");
+    const numMode = rawNum.trim();
+    const cslNumRe = /^\s*(?:\[\s*\d+\s*\]|［\s*\d+\s*］|\(\s*\d+\s*\)|（\s*\d+\s*）|\d{1,4}\s*[.、．)）])\s*/;
+    const keepCsl = numMode === "" || numMode === "csl";
+    let seq = 0;
+
     list.forEach((k) => {
       const raw = (rendered.bibByKey && rendered.bibByKey[k]) || "";
       let text = cslHtmlToMarkdown(raw);
-      // 文末条目一律不加编号：数字式样式会给出 "[1] " / "1. " / "（1）" 这类前缀，
-      // 一律剥掉；顺序仍按样式给出的引文序排列，与正文 [1][2] 自然对得上。
-      // ⚠️ "1. " 不剥的话，markdown 会把它解析成有序列表，条目就变成带序号的项目符号。
-      text = text.replace(/^\s*(?:\[\s*\d+\s*\]|［\s*\d+\s*］|\(\s*\d+\s*\)|（\s*\d+\s*）|\d{1,4}\s*[.、．)）])\s*/, "");
+      if (keepCsl) {
+        /*
+         * ⚠️ 保留 CSL 编号时必须防一件事：`1. ` 开头的段落会被 markdown 解析成
+         *    有序列表，条目立刻变成带序号的列表项（实测：块类型从 p 变 l）。
+         *    在点号前加反斜杠即可 —— 思源渲染时反斜杠不显示，正文仍是 "1. "。
+         */
+        text = text.replace(/^(\d{1,4})\.(\s)/, "$1\\.$2");
+      } else {
+        text = text.replace(cslNumRe, "");
+        if (numMode !== "none") {
+          seq++;
+          // ⚠️ 用 rawNum，不能用 trim 过的：模板里的尾随空格（"{n}. "）是排版的一部分
+          const tpl = rawNum.indexOf("{n}") >= 0 ? rawNum.replace(/\{n\}/g, String(seq)) : rawNum + seq;
+          // 自定义模板给了 "1. " 这种前缀，同样要防被解析成有序列表
+          text = tpl.replace(/^(\d{1,4})\.(\s)/, "$1\\.$2") + text;
+        }
+      }
       text = escapeLooseBrackets(text);
       // 文末条目的跳转链接带 ?bib=1，与正文引用区分（正文正则不含 ?，天然隔离）
       const jump = this.settings.linkEnabled
@@ -2423,7 +2547,8 @@ module.exports = class ZoteroCite extends Plugin {
     const patch = {};
     root.querySelectorAll("[data-k]").forEach((el) => {
       const k = el.getAttribute("data-k");
-      patch[k] = el.type === "checkbox" ? el.checked : el.value.trim();
+      // 编号模板的尾随空格有排版意义（"{n}. " 里的空格），不能 trim；其余照旧去空白
+      patch[k] = el.type === "checkbox" ? el.checked : (k === "bibNumber" ? el.value : el.value.trim());
     });
     this.updateSettings(patch);
   }
@@ -2479,6 +2604,22 @@ module.exports = class ZoteroCite extends Plugin {
             <div class="zc-field__label">文末标题</div>
             <input class="b3-text-field" data-k="bibHeading" value="">
           </div>
+          <div class="zc-field">
+            <div class="zc-field__label">文末编号样式（编号本来就由 CSL 样式决定，这里只是「跟随 / 关掉 / 覆盖」）</div>
+            <div class="zc-numrow">
+              <select class="b3-select zc-num-preset">
+                <option value="">跟随 CSL 样式（推荐）</option>
+                <option value="none">不显示编号</option>
+                <option value="{n}. ">1.</option>
+                <option value="[{n}] ">[1]</option>
+                <option value="({n}) ">(1)</option>
+                <option value="（{n}）">（1）</option>
+                <option value="{n}、">{n}、</option>
+              </select>
+              <input class="b3-text-field fn__flex-1" data-k="bibNumber" value="" placeholder="跟随 CSL">
+            </div>
+            <div class="zc-field__hint">留空 = 用 CSL 样式自带的编号（IEEE 出 [1]、Nature 出 1.、作者年式本来就没有）。想换成别的写法，选预设或自己写 <code>{n}</code> 占位模板（如 <code>【{n}】</code>、<code>Ref {n}: </code>）。改完点「保存」，再执行一次「重排全文」生效。</div>
+          </div>
           <div class="zc-field zc-field--inline">
             <label class="zc-field__label">引用带链接（可点击跳回 Zotero）</label>
             <input type="checkbox" data-k="linkEnabled">
@@ -2503,6 +2644,24 @@ module.exports = class ZoteroCite extends Plugin {
         el.value = s[k] == null ? "" : s[k];
       }
     });
+
+    /* 「文末编号样式」预设 ↔ 输入框联动：选预设就填进输入框，自定义值也能原样回显 */
+    const numSel = root.querySelector(".zc-num-preset");
+    const numInput = root.querySelector('[data-k="bibNumber"]');
+    if (numSel && numInput) {
+      const cur = String(numInput.value || "");
+      const hit = Array.from(numSel.options).some((o) => o.value === cur);
+      if (!hit) {
+        const o = document.createElement("option");
+        o.value = cur;
+        o.textContent = "自定义";
+        numSel.appendChild(o);
+      }
+      numSel.value = cur;
+      numSel.addEventListener("change", () => {
+        numInput.value = numSel.value;
+      });
+    }
 
     const save = async () => {
       this.saveFromSetting();

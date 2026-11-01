@@ -16,7 +16,7 @@ Insert Zotero citations into SiYuan — both the in-text citation and the biblio
 | 2.2 Text follows CSL exactly | How the citation reads, how multiple items are joined, whether `[n]` appears — all decided by the active Zotero style (APA, Nature, IEEE, GB/T 7714, ACS, journal-specific styles) |
 | 2.3 Two forms, mixable per citation | Default form (parent item / author-date / numeric) plus narrative `Chen et al. (2021)`; you can mix them in one document and even stack them as `Chen et al. (2021) [1]` |
 | 2.4 Edit existing citations | Switch form, add or remove references of that citation, change the document-wide CSL style, jump to the matching bibliography entry |
-| 2.5 Bibliography maintained automatically | Order follows the style (alphabetical for author-date, citation order for numeric); entries carry no numbering; re-rendered when the style changes |
+| 2.5 Bibliography maintained automatically | Order follows the style (alphabetical for author-date, citation order for numeric); entry numbering follows the CSL style by default, and can be turned off or replaced with a custom template; re-rendered when the style changes |
 | 2.6 Click to jump back to Zotero | Clicking a citation selects that item in Zotero; multi-item citations select all of them |
 | 2.7 Parent items only | Selecting a PDF or an annotation in Zotero resolves to its parent item; standalone notes and attachments never appear |
 | 2.8 Undo | 20 steps per document, style switches included |
@@ -104,6 +104,7 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | 6.9 Right-click · Edit references… (add or remove) | Right-click an in-text citation → item 3, opens the editor | — |
 | 6.10 Right-click · Change document CSL style… | Right-click an in-text citation → item 4, opens the style picker | — |
 | 6.11 Right-click · Locate this entry in the bibliography | Right-click an in-text citation → item 5, scrolls to the entry and highlights it for 1.9 s | — |
+| 6.12 Right-click · Refresh Zotero citations in this document | Right-click an in-text citation → item 6, re-renders every citation and the bibliography with the current style | — |
 
 The right-click menu only works on **in-text citations**, and only affects the citation you clicked. The `[↗]` link on a bibliography entry does not open the menu — it is the jump-back-to-Zotero link. None of the menu items has a default shortcut; bind the matching commands in Settings → Keymap → Plugins if you want one.
 
@@ -121,7 +122,7 @@ The right-click menu only works on **in-text citations**, and only affects the c
 
 If nothing is selected in Zotero you get a one-line hint, never a dialog.
 
-### 7.2 Edit an existing citation (right-click, 5 items)
+### 7.2 Edit an existing citation (right-click, 6 items)
 
 | Menu item | Effect |
 |---|---|
@@ -164,6 +165,6 @@ An in-text citation is just a markdown link:
 4. **Rebuilding the bibliography wipes everything after the heading** — never write body text below the "参考文献" heading; it will be deleted on every re-render
 5. **Undo is a separate stack** — `Ctrl+Z` only covers inserting; re-rendering and style switches need the plugin's own undo command
 6. **Narrative form is author-date only** — IEEE and GB/T numeric styles have no such concept
-7. **Bibliography entries show no numbering** — a deliberate choice to avoid duplicated list markers; stricter GB/T numeric formatting expects `[1]` on each entry, so check your journal's requirement before submission
+7. **Bibliography numbering follows the CSL style by default** — numeric styles produce `[1]` / `1.` (a leading `1. ` is written in escaped form so markdown does not turn it into an ordered list); author-date styles have none. You can switch to "no numbering" or a custom template (`{n}` = sequence) in settings. Check your journal's requirement before submission
 8. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
 9. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**

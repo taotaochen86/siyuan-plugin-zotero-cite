@@ -113,6 +113,28 @@
   box-sizing: border-box;
   margin: 0;
 }
+.zc-setting .zc-numrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.zc-setting .zc-numrow select {
+  width: auto;
+  flex: none;
+  min-width: 150px;
+}
+.zc-setting .zc-field__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: .6;
+  word-break: break-word;
+}
+.zc-setting .zc-field__hint code {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--b3-theme-surface-lighter, rgba(0, 0, 0, .06));
+}
 .zc-setting .zc-field--inline {
   flex-direction: row;
   align-items: center;
