@@ -27,7 +27,7 @@ Insert Zotero citations into SiYuan — both the in-text citation and the biblio
 |---|---|
 | 3.1 There is no citation concept at all — only block references and plain hyperlinks | A citation is a `zotero://` link whose visible text is rendered by CSL, effectively bringing Zotero's citation engine into SiYuan |
 | 3.2 The bibliography has to be pasted in from Zotero by hand, and rebuilt whenever the style changes | The bibliography is generated automatically and re-rendered together with the body when the style changes |
-| 3.3 In-text formatting (author-date vs. numeric) is typed manually; changing one citation means fixing every number | Numbers and author-date strings are assigned by CSL in citation order — re-render once after adding or removing citations |
+| 3.3 In-text formatting (author-date vs. numeric) is typed manually; changing one citation means fixing every number | Numbers and author-date strings are assigned by CSL in citation order; body and bibliography re-render automatically after citations are added or removed |
 | 3.4 In-text citations and bibliography entries have no link to each other, so removing a reference means fixing both ends | Both ends share the same itemKey; delete an in-text citation, re-render, and the bibliography entry disappears |
 | 3.5 Finding which paper a sentence came from means digging through Zotero | Click the citation to jump to Zotero with the item selected — all items for a multi-item citation |
 | 3.6 Journal and thesis templates differ wildly; hand-formatting is error-prone | Thousands of CSL styles are available instantly, and custom CSL files work too |
@@ -163,8 +163,7 @@ An in-text citation is just a markdown link:
 3. **Desktop only** — it needs the local port 23119, so the web and mobile clients cannot use it
 4. **Rebuilding the bibliography wipes everything after the heading** — never write body text below the "参考文献" heading; it will be deleted on every re-render
 5. **Undo is a separate stack** — `Ctrl+Z` only covers inserting; re-rendering and style switches need the plugin's own undo command
-6. **Numeric styles need a manual re-render** — numbers are reassigned by CSL after adding or removing citations
-7. **Narrative form is author-date only** — IEEE and GB/T numeric styles have no such concept
-8. **Bibliography entries show no numbering** — a deliberate choice to avoid duplicated list markers; stricter GB/T numeric formatting expects `[1]` on each entry, so check your journal's requirement before submission
-9. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
-10. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses
+6. **Narrative form is author-date only** — IEEE and GB/T numeric styles have no such concept
+7. **Bibliography entries show no numbering** — a deliberate choice to avoid duplicated list markers; stricter GB/T numeric formatting expects `[1]` on each entry, so check your journal's requirement before submission
+8. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
+9. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**
