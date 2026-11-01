@@ -888,9 +888,9 @@ module.exports = class ZoteroCite extends Plugin {
     /* 顶栏按钮 */
     this.topBarEl = this.addTopBar({
       icon: ICON_SVG,
-      title: "插入 Zotero 文献引用",
+      title: "插入 Zotero 文献引用（用 Zotero 当前选中项）",
       position: "right",
-      callback: () => this.openInsertDialog(),
+      callback: () => this.insertFromSelection(),
     });
 
     /* 追踪当前编辑器 */
@@ -991,7 +991,7 @@ module.exports = class ZoteroCite extends Plugin {
             }
           } catch (e) { /* 忽略，交给 getProtyle 兜底 */ }
         }
-        this.openInsertDialog();
+        this.insertFromSelection();
       },
     }];
 
@@ -999,7 +999,7 @@ module.exports = class ZoteroCite extends Plugin {
     this.addCommand({
       langKey: "insertCite",
       hotkey: "",
-      callback: () => this.openInsertDialog(),
+      callback: () => this.insertFromSelection(),
     });
     this.addCommand({
       langKey: "refreshCites",
@@ -1222,6 +1222,47 @@ module.exports = class ZoteroCite extends Plugin {
 
   /* ---------------- 插入 ---------------- */
 
+  /**
+   * 直接插入：拿 Zotero 当前选中条目就插，不弹窗。
+   * 只有「编辑 / 删除 / 追加」才需要打开对话框（右键菜单里的编辑入口）。
+   */
+  async insertFromSelection() {
+    if (!this.getDocId()) {
+      showMessage("请先把光标放到要插入的位置");
+      return;
+    }
+    let selected = [];
+    try {
+      selected = await fetchSelected(this.settings);
+    } catch (e) {
+      showMessage(String(e.message || e), 6000);
+      return;
+    }
+    if (!selected.length) {
+      showMessage("Zotero 里没有选中文献：先在 Zotero 选中条目（可多选），再回来点插入", 5000);
+      return;
+    }
+    const keys = selected.map(x => x && x.key).filter(Boolean);
+    if (!keys.length) {
+      showMessage("选中的条目没有可引用的书目信息", 4000);
+      return;
+    }
+    // 与对话框路径一致：先把实例与光标存下来，插入时才有落点
+    const protyle = this.getProtyle();
+    this._pending = {
+      protyle,
+      range: protyle && protyle.toolbar ? protyle.toolbar.range : null,
+    };
+    try {
+      await this.insertCitation(keys, this.settings.defaultFormat);
+      showMessage(`已插入 ${keys.length} 条文献引用`, 2000);
+    } catch (e) {
+      showMessage(String(e.message || e), 6000);
+    }
+  }
+
+  /** 旧的「搜索 + 勾选」插入窗口：插入不再走它（一律直插），目前没有 UI 入口，
+      保留作搜索式插入的备用实现；编辑/追加/删除走右键菜单里的编辑对话框。 */
   async openInsertDialog() {
     const docId0 = this.getDocId();
     if (!docId0) {
@@ -2345,9 +2386,10 @@ module.exports = class ZoteroCite extends Plugin {
     list.forEach((k) => {
       const raw = (rendered.bibByKey && rendered.bibByKey[k]) || "";
       let text = cslHtmlToMarkdown(raw);
-      // 文末条目一律不加编号：数字式样式（IEEE / Nature / GB-T 7714）会在条目开头带 "[1] "，
-      // 这里剥掉；顺序仍按样式给出的引文序排列，与正文 [1][2] 自然对得上。
-      text = text.replace(/^\s*\[\s*\d+\s*\]\s*/, "");
+      // 文末条目一律不加编号：数字式样式会给出 "[1] " / "1. " / "（1）" 这类前缀，
+      // 一律剥掉；顺序仍按样式给出的引文序排列，与正文 [1][2] 自然对得上。
+      // ⚠️ "1. " 不剥的话，markdown 会把它解析成有序列表，条目就变成带序号的项目符号。
+      text = text.replace(/^\s*(?:\[\s*\d+\s*\]|［\s*\d+\s*］|\(\s*\d+\s*\)|（\s*\d+\s*）|\d{1,4}\s*[.、．)）])\s*/, "");
       text = escapeLooseBrackets(text);
       // 文末条目的跳转链接带 ?bib=1，与正文引用区分（正文正则不含 ?，天然隔离）
       const jump = this.settings.linkEnabled

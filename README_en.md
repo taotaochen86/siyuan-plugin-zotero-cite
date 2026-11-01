@@ -102,13 +102,15 @@ SiYuan → Settings → Bazaar → Downloaded → Plugins → Zotero Cite → Se
 
 ### Insert a citation
 
-1. Select items in Zotero (multi-select works; you can also search and tick items inside the dialog)
+1. Select items in Zotero (multi-select works)
 2. Back in SiYuan, put the cursor where the citation should go
-3. Any of three entry points:
+3. Any of three entry points — one click **inserts straight away, no dialog**:
    - Click the red Z icon in the top bar
    - Type `/zotero` in the editor and press Enter (slash menu)
    - Search "插入 Zotero 文献引用" in the command palette
-4. Tick the items → insert
+4. If nothing is selected in Zotero you get a one-line hint, not a dialog
+
+To search for items or add/remove references inside an existing citation, use the right-click "Edit references…" dialog — that is what it is for.
 
 **Parent items only**: notes and PDF attachments — whether found by search or selected in Zotero — are resolved to their parent item. Standalone notes and standalone attachments (no parent) never appear, because they carry no bibliographic data. So selecting a PDF in Zotero still inserts the paper it belongs to.
 
