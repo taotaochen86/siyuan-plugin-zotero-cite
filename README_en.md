@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.29
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.30
 
 **English** | [简体中文](./README.md)
 
@@ -90,7 +90,7 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | Default citation form | Default (CSL) | Affects new citations only; existing ones follow their own `?f=` |
 | CSL style | current style | You can paste a style URL directly |
 | Pick from installed styles… | — | Opens the style picker; search and switch, whole document re-renders |
-| Bibliography heading | 参考文献 | Must match the heading used in the document |
+| Bibliography heading | Auto | "Auto" picks 参考文献 or References from the CSL style's language; choose "no heading" to output entries only and write the heading yourself; or type any custom text |
 | Citations carry links | on | Turn off for plain text; click-to-Zotero and the right-click menu stop working |
 
 ## 6 Slash command and shortcuts
@@ -175,12 +175,13 @@ An in-text citation is just a markdown link:
 1. **Hard dependency on Zotero + Debug Bridge** — without it the plugin does nothing; it is not self-contained
 2. **Zotero only** — EndNote, Mendeley, NoteExpress and direct PubMed lookup are not supported
 3. **Desktop only** — it needs the local port 23119, so the web and mobile clients cannot use it
-4. **Rebuilding the bibliography wipes everything after the heading** — never write body text below the "参考文献" heading; it will be deleted on every re-render
-5. **Undo is a separate stack** — `Ctrl+Z` only covers inserting; re-rendering and style switches need the plugin's own undo command
-6. **Narrative form is author-date only** — IEEE and GB/T numeric styles have no such concept
-7. **Bibliography numbering follows the CSL style by default** — numeric styles produce `[1]` / `1.` (a leading `1. ` is written in escaped form so markdown does not turn it into an ordered list); author-date styles have none. You can switch to "no numbering" or a custom template (`{n}` = sequence) in settings. Check your journal's requirement before submission
-8. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
-9. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**
+4. **Bibliography entries are owned by the plugin** — every entry carries a `custom-zotero-bib` block attribute and a re-render only replaces those marked blocks. Do not edit that attribute by hand, and do not expect entries moved elsewhere to still be recognised
+5. **"Auto" heading is a guess** — the test is whether the CSL style title contains CJK characters, plus keywords in the style ID (GB/T 7714, CSTR, …). A homemade private style may be misjudged; set the heading text explicitly in settings
+6. **Undo is a separate stack** — `Ctrl+Z` only covers inserting; re-rendering and style switches need the plugin's own undo command
+7. **Narrative form is author-date only** — IEEE and GB/T numeric styles have no such concept
+8. **Bibliography numbering follows the CSL style by default** — numeric styles produce `[1]` / `1.` (a leading `1. ` is written in escaped form so markdown does not turn it into an ordered list); author-date styles have none. You can switch to "no numbering" or a custom template (`{n}` = sequence) in settings. Check your journal's requirement before submission
+9. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
+10. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**
 
 ---
 
@@ -191,7 +192,7 @@ An in-text citation is just a markdown link:
 | Talking to Zotero | Talks to `http://127.0.0.1:23119/debug-bridge/execute` directly, running a small piece of JS inside Zotero to fetch item metadata, installed CSL styles and the rendered citation string. No helper process, no proxy service |
 | What a citation is | An ordinary markdown link `[(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)`; the link itself is the single source of truth (see 7.4) |
 | Citation text | Rendered by the CSL style installed in Zotero; in-text and bibliography strings come from the same source and are re-rendered together when the style changes |
-| Bibliography | Finds the "参考文献" heading and rebuilds everything after it; entry links carry `?bib=1` and are skipped on re-render, so deleted references never come back |
+| Bibliography | Entries are recognised by a `custom-zotero-bib` block attribute (old documents fall back to matching the heading text) and only those marked blocks are replaced; the heading is auto-generated, customised, or omitted entirely per settings; entry links carry `?bib=1` and are skipped on re-render, so deleted references never come back |
 | Undo | One stack per document, 20 steps, written back through the kernel `/api/transactions` API |
 | Runtime | SiYuan desktop renderer (Node available); the web and mobile clients have no port 23119 and cannot use it |
 | Code layout | A single `index.js`: plugin class + three dialogs + right-click menu + settings page; `index.css` only handles layout and takes every color from SiYuan CSS variables, so light and dark themes follow automatically |
@@ -220,6 +221,7 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.30 | 2026-11-04 | Bibliography heading is now "Auto" (参考文献 / References from the CSL style language, or none at all, or custom); entries are located by the `custom-zotero-bib` block attribute, so renaming or deleting the heading no longer duplicates the list |
 | 1.2.29 | 2026-11-04 | Cover rebuilt to pass the bazaar check: grid removed, background simplified, canvas 1376×800, `preview.png` down from 935KB to 485KB (limit 512KB); preflight now checks cover size |
 | 1.2.28 | 2026-11-03 | Marketplace cover now uses a real document screenshot (in-text citations + bibliography), with card padding and bottom fade |
 | 1.2.27 | 2026-11-03 | Author name unified to ttChen (plugin.json / package.json / LICENSE / README) |

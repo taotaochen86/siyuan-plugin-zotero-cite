@@ -22,18 +22,33 @@ const { Plugin, Setting, Dialog, showMessage, fetchSyncPost } = require("siyuan"
 
 /* ============================ 常量 ============================ */
 
+/**
+ * 文末文献条目的块标记。
+ * ⚠️ 标题是可配置的、还能完全不生成，所以定位文末列表不能再靠「含参考文献字样的标题块」，
+ *    改成给每条文献打一个属性标记，定位只看这个属性。
+ *    老版本文档（1.2.29 及以前）的条目没有标记，locateBib 里会退回标题文字匹配，仍能接管。
+ */
+const BIB_ATTR = "custom-zotero-bib";
+
 const DEFAULT_SETTINGS = {
   bridgeUrl: "http://127.0.0.1:23119/debug-bridge/execute",
   token: "",
   styleId: "http://www.zotero.org/styles/apa",
   defaultFormat: "csl",
-  bibHeading: "参考文献",
+  // 文末标题。三种取值：
+  //   "auto"（默认）→ 按当前 CSL 样式的语言自动选：「参考文献」/「References」
+  //   ""            → 不生成标题（中文论文与英文论文写法不同，标题交给用户自己在文档里写）
+  //   其它文字       → 原样使用
+  bibHeading: "auto",
   // 文末文献列表的编号样式。
   //   ""      → 跟随 CSL 样式自带的编号（IEEE 出 [1]、Nature 出 1.、作者年式本来就没有）
   //   "none"  → 不显示编号
   //   其它    → 当作模板覆盖，`{n}` 是序号占位符，如 "{n}. " / "[{n}] " / "【{n}】"
   bibNumber: "",
   linkEnabled: true,
+  // 内部标记：文末标题的默认值由「参考文献」改成 auto 时迁移过一次，
+  // 避免每次启动都把用户显式设置的「参考文献」重新覆盖成 auto
+  bibHeadingMigrated: false,
 };
 
 /* ============================ 依赖与图标 ============================ */
@@ -532,6 +547,44 @@ return JSON.stringify({styles: list});
   return (r && r.styles) || [];
 }
 
+/* ============================ 文末标题 ============================ */
+
+/**
+ * 判断当前 CSL 样式是不是「中文样式」。
+ * 优先看 Zotero 给出的样式 title 里有没有汉字（渲染脚本已经把 style.title 带回来了）；
+ * 拿不到 title 时退回 styleId 的关键字（GB/T 7714 系列、CSTR、各家中文期刊样式都命中）。
+ */
+function isChineseStyle(styleId, styleTitle) {
+  if (/[\u3400-\u9fff]/.test(String(styleTitle || ""))) {
+    return true;
+  }
+  const id = String(styleId || "").toLowerCase();
+  return /china|chinese|gb[-\/]?t|7714|cstr|zh[-\/]|cn[-\/]/.test(id);
+}
+
+/**
+ * 解析文末标题最终要写的文字。返回空字符串表示「不生成标题块」。
+ *   "auto"      → 中文样式「参考文献」，其它「References」
+ *   "" / "none" → 空（不生成）
+ *   其它        → 原样
+ * ⚠️ rendered 可能为 null（扫描阶段还没渲染），这时只用 styleId 判断，结果一致。
+ */
+function resolveBibHeading(settings, rendered) {
+  const raw = String((settings && settings.bibHeading) == null ? "auto" : settings.bibHeading).trim();
+  if ("" === raw || "none" === raw.toLowerCase()) {
+    return "";
+  }
+  if ("auto" === raw.toLowerCase()) {
+    const st = (rendered && rendered.style) || {};
+    const id = st.id || (settings && settings.styleId);
+    return isChineseStyle(id, st.title) ? "参考文献" : "References";
+  }
+  return raw;
+}
+
+/** 插件自己以前写过的标题文字，用来认领老文档里的标题块 */
+const LEGACY_BIB_HEADINGS = ["参考文献", "References", "Bibliography", "参考书目"];
+
 /* ============================ HTML → Markdown ============================ */
 
 const ENTITIES = {
@@ -1009,6 +1062,15 @@ module.exports = class ZoteroCite extends Plugin {
     if (!saved.defaultFormat && saved.mode) {
       this.settings.defaultFormat = (saved.mode === "narrative") ? "narr" : "csl";
     }
+    /*
+     * 文末标题：默认值从「参考文献」改成 auto（按 CSL 样式语言自动选）。
+     * 老配置里存的正是旧默认值，一次性迁到 auto —— 中文样式仍然出「参考文献」，
+     * 换英文样式时才会变成 References。用户自己改过的标题不动。
+     */
+    if (!saved.bibHeadingMigrated && "参考文献" === this.settings.bibHeading) {
+      this.settings.bibHeading = "auto";
+    }
+    this.settings.bibHeadingMigrated = true;
     this.curProtyle = null;
     this.styleCache = null;
     this._menuEl = null;
@@ -2546,17 +2608,11 @@ module.exports = class ZoteroCite extends Plugin {
      */
     const bibIds = new Set();
     try {
-      const chResp = await fetchSyncPost("/api/block/getChildBlocks", { id: docId });
-      const kids = (chResp && chResp.data) || [];
-      const bibHeading = this.settings.bibHeading || "参考文献";
-      let hAt = -1;
-      kids.forEach((c, i) => {
-        if (c && c.type === "h" && String(c.content || "").indexOf(bibHeading) >= 0) {
-          hAt = i;
-        }
-      });
-      if (hAt >= 0) {
-        kids.slice(hAt).forEach((c) => bibIds.add(c.id));
+      // 定位逻辑与 rebuildBibliography 共用一份，避免两处对「哪一段是文末」判断不一致
+      const loc = await this.locateBib(docId, resolveBibHeading(this.settings, null));
+      loc.entries.forEach((c) => bibIds.add(c.id));
+      if (loc.headingIndex >= 0 && loc.children[loc.headingIndex]) {
+        bibIds.add(loc.children[loc.headingIndex].id);
       }
     } catch (e) { /* 取不到就按没有文末处理 */ }
 
@@ -2728,27 +2784,92 @@ module.exports = class ZoteroCite extends Plugin {
     return { updated, keys: scan.keys.length };
   }
 
+  /**
+   * 定位文末文献表。返回 { headingIndex, entries, marked }：
+   *   headingIndex  标题块在子块数组里的下标，-1 表示这一段没有标题
+   *   entries       旧的文献条目块
+   *   marked        true = 靠块属性认出来的（新版）；false = 靠标题文字兜底（老文档）
+   *
+   * ⚠️ 为什么不能只看标题：标题现在可配、还能不生成，一旦标题改了或删了，
+   *    再靠文字找就会找不到旧表，于是每次重排都往文末再追加一份。
+   *    新版条目一律打 BIB_ATTR 标记，定位与文字无关；老文档退回标题匹配，仍然能接管。
+   */
+  async locateBib(docId, headingText) {
+    const children = ((await fetchSyncPost("/api/block/getChildBlocks", { id: docId })) || {}).data || [];
+    if (!children.length) {
+      return { headingIndex: -1, entries: [], marked: false, children };
+    }
+
+    // 1) 先按块属性找（一次批量查询，比逐块读 kramdown 快一个量级）
+    const marked = new Set();
+    try {
+      const ids = children.map((c) => c.id);
+      const r = await fetchSyncPost("/api/attr/batchGetBlockAttrs", { ids });
+      const map = (r && r.data) || {};
+      ids.forEach((id) => {
+        if (map[id] && "1" === String(map[id][BIB_ATTR])) {
+          marked.add(id);
+        }
+      });
+    } catch (e) { /* 读不到属性就走兜底 */ }
+
+    if (marked.size) {
+      const firstIdx = children.findIndex((c) => marked.has(c.id));
+      // 标记块紧挨着的那一块，如果是标题，算作这段的标题
+      let hIdx = -1;
+      if (firstIdx > 0 && children[firstIdx - 1] && "h" === children[firstIdx - 1].type) {
+        hIdx = firstIdx - 1;
+      }
+      return { headingIndex: hIdx, entries: children.filter((c) => marked.has(c.id)), marked: true, children };
+    }
+
+    // 2) 兜底：老文档没有标记，按标题文字认
+    const heads = [headingText].concat(LEGACY_BIB_HEADINGS).filter(Boolean);
+    let hAt = -1;
+    children.forEach((c, i) => {
+      // 取最后一个命中：正文里偶尔也会出现同名小标题，文末那个才是文献表
+      if (c && "h" === c.type && heads.some((h) => String(c.content || "").indexOf(h) >= 0)) {
+        hAt = i;
+      }
+    });
+    if (hAt >= 0) {
+      return { headingIndex: hAt, entries: children.slice(hAt + 1), marked: false, children };
+    }
+    return { headingIndex: -1, entries: [], marked: false, children };
+  }
+
+  /** 给刚追加的条目块打上 BIB_ATTR 标记（追加的块都在文档末尾，取末 count 个即可） */
+  async markBibEntries(docId, count) {
+    if (!(count > 0)) {
+      return;
+    }
+    try {
+      const kids = ((await fetchSyncPost("/api/block/getChildBlocks", { id: docId })) || {}).data || [];
+      const tail = kids.slice(-count).filter((c) => c && "h" !== c.type);
+      if (!tail.length) {
+        return;
+      }
+      await fetchSyncPost("/api/attr/batchSetBlockAttrs", {
+        blockAttrs: tail.map((c) => ({ id: c.id, attrs: { [BIB_ATTR]: "1" } })),
+      });
+    } catch (e) { /* 标记失败只影响下次定位精度，不影响这次结果 */ }
+  }
+
   /** 文末参考文献表：先清掉旧表，再追加。顺序与编号完全用样式给出的结果 */
   async rebuildBibliography(docId, keys, rendered) {
-    const heading = this.settings.bibHeading || "参考文献";
-    // ⚠️ 不能用 SQL 的 sort 比较判断前后：思源 3.8.8 里多个块共享相同 sort 值
-    // （h 与 p 都可能是 5 / 10 / 20），按 sort 过滤会误删正文。改用 getChildBlocks 的顺序。
-    const childResp = await fetchSyncPost("/api/block/getChildBlocks", { id: docId });
-    const children = (childResp && childResp.data) || [];
-    let idx = -1;
-    for (let i = children.length - 1; i >= 0; i--) {
-      const c = children[i];
-      if (c && c.type === "h" && String(c.content || "").indexOf(heading) >= 0) {
-        idx = i;
-        break;
-      }
-    }
+    const heading = resolveBibHeading(this.settings, rendered);
+    /*
+     * ⚠️ 不能用 SQL 的 sort 比较判断前后：思源 3.8.8 里多个块共享相同 sort 值
+     * （h 与 p 都可能是 5 / 10 / 20），按 sort 过滤会误删正文。改用 getChildBlocks 的顺序。
+     * ⚠️ 定位不再靠标题文字：标题可配、还能不生成。见 locateBib。
+     */
+    const { headingIndex, entries: oldEntries, children } = await this.locateBib(docId, heading);
+    const idx = headingIndex;
     /*
      * ⚠️ 以前这里是「全删重建」：把标题之后的块逐个 deleteBlock，再一坨 appendBlock。
      *    实测 300 条文献时这一步要 14.7 秒（300 次删除调用），而且内容没变也照删照建。
      *    现在改成增量：内容一致就一个字都不写；有差异才 update / 删多余 / 补缺失。
      */
-    const oldEntries = idx >= 0 ? children.slice(idx + 1) : [];
 
     // 组装条目：顺序直接用样式给出的 bibOrder（作者年=字母序，数字式=引用序）
     const entries = [];
@@ -2800,23 +2921,13 @@ module.exports = class ZoteroCite extends Plugin {
     });
 
     const finalEntries = entries.length ? entries : ["（暂无引用）"];
-
-    /* 没有文末：整段追加（标题 + 条目） */
-    if (idx < 0) {
-      await fetchSyncPost("/api/block/appendBlock", {
-        parentID: docId,
-        dataType: "markdown",
-        data: [`## ${heading}`, ""].concat(finalEntries).join("\n\n"),
-      });
-      return;
-    }
-
+    // 标题要不要写：heading 为空串 = 不生成（中英文论文的标题写法不同，交给用户自己写）
+    const headBlocks = heading ? [`## ${heading}`, ""] : [];
     /*
-     * 比对方式：**内容指纹**，不逐块读。
+     * 内容指纹：只比条目文本，不逐块读。
      *   · 逐块 getBlockKramdown 读 300 条 → 5 秒；
      *   · 一次 SQL `id IN (...)` 读 → 0 行（刚写入的块还没进索引）；
      *   · 指纹存在文档属性里，读一次属性就能判断"要不要动"，常态 0 写入。
-     * 指纹不同才真正重建；重建时删除并发、插入一次批量，不做逐条调用。
      */
     const hashOf = (arr) => {
       const s = arr.join("\u0001");
@@ -2827,13 +2938,88 @@ module.exports = class ZoteroCite extends Plugin {
       return h.toString(36) + "-" + s.length;
     };
     const myHash = hashOf(finalEntries);
-    let prevHash = "";
+
+    /*
+     * 没有文末：整段追加（标题 + 条目）。
+     * ⚠️ 判断「有没有文末」不能只看 idx：标题关掉（或用户手动删掉了标题）时
+     *    idx 是 -1，但标记过的条目还在，这时再走追加就会多出一份。
+     * ⚠️ 首次追加后必须把「这次用的标题」记进文档属性，否则下一次重排会以为
+     *    上一次是「不生成」，又给补一个标题上去。
+     */
+    if (idx < 0 && !oldEntries.length) {
+      await fetchSyncPost("/api/block/appendBlock", {
+        parentID: docId,
+        dataType: "markdown",
+        data: headBlocks.concat(finalEntries).join("\n\n"),
+      });
+      await this.markBibEntries(docId, finalEntries.length);
+      try {
+        await fetchSyncPost("/api/attr/setBlockAttrs", {
+          id: docId,
+          attrs: { "custom-zotero-bibhash": myHash, "custom-zotero-bibheading": heading },
+        });
+      } catch (e) { /* 属性写失败只影响下次比对精度 */ }
+      return;
+    }
+
+    /* 读一次文档属性：上次的标题设置 + 文献表内容指纹，都在这里 */
+    let docAttrs = {};
     try {
       const a = await fetchSyncPost("/api/attr/getBlockAttrs", { id: docId });
-      prevHash = (a && a.data && a.data["custom-zotero-bibhash"]) || "";
-    } catch (e) { /* 读不到就当作要重建 */ }
-    if (idx >= 0 && prevHash === myHash && oldEntries.length === finalEntries.length) {
-      return;   // 内容没变：一个字都不写（幂等刷新到此为止）
+      docAttrs = (a && a.data) || {};
+    } catch (e) { /* 读不到就当作都没有 */ }
+    const prevHeading = String(docAttrs["custom-zotero-bibheading"] || "");
+
+    /*
+     * 标题跟着设置走：
+     *   · 有设置值、现有标题文字不同 → 改文字；
+     *   · 有设置值、但现在根本没有标题块（上次设的是「不生成」）→ 补一个，
+     *     位置在第一个条目前面。只在上次设置不同的时候补 —— 否则就是用户自己
+     *     把标题删掉了，不该每次都加回去；
+     *   · 设置成「不生成」、现有标题正是插件以前写的那几个标准标题 → 删掉，
+     *     否则用户把标题关掉了，文档里还挂着「参考文献」。
+     *     非标准标题（用户自己写的）一律不动。
+     */
+    if (heading) {
+      if (idx >= 0 && children[idx]) {
+        const curHead = String(children[idx].content || "").trim();
+        if (curHead !== heading) {
+          await fetchSyncPost("/api/block/updateBlock", {
+            id: children[idx].id,
+            dataType: "markdown",
+            data: `## ${heading}`,
+          }).catch(() => null);
+        }
+      } else if (prevHeading !== heading && oldEntries.length) {
+        await fetchSyncPost("/api/block/insertBlock", {
+          dataType: "markdown",
+          data: `## ${heading}`,
+          parentID: docId,
+          nextID: oldEntries[0].id,
+        }).catch(() => null);
+      }
+    } else if (idx >= 0 && children[idx] &&
+               LEGACY_BIB_HEADINGS.indexOf(String(children[idx].content || "").trim()) >= 0) {
+      await fetchSyncPost("/api/block/deleteBlock", { id: children[idx].id }).catch(() => null);
+    }
+
+    /* 指纹相同 = 内容没变，条目一个字都不写（幂等刷新到此为止） */
+    const prevHash = String(docAttrs["custom-zotero-bibhash"] || "");
+    if ((idx >= 0 || oldEntries.length) && prevHash === myHash && oldEntries.length === finalEntries.length) {
+      /*
+       * 但「这次用的标题」一定要记下来：标题刚被改过（比如从「参考文献」改成自定义），
+       * 条目内容却一个字没变，如果这里直接返回，属性里还是旧标题，
+       * 下次重排又会认为「上次和这次不一样」，于是再插一个标题。
+       */
+      if (prevHeading !== heading) {
+        try {
+          await fetchSyncPost("/api/attr/setBlockAttrs", {
+            id: docId,
+            attrs: { "custom-zotero-bibheading": heading },
+          });
+        } catch (e) { /* 属性写失败只影响下次比对精度 */ }
+      }
+      return;
     }
 
     /*
@@ -2842,7 +3028,7 @@ module.exports = class ZoteroCite extends Plugin {
      *    改用 /api/transactions 一次提交 100 个 delete，实测 10 块 49ms。
      *    事务不可用（版本差异/被禁用）时自动退回逐块删，功能不受影响。
      */
-    if (idx >= 0 && oldEntries.length) {
+    if (oldEntries.length) {
       const batch = 100;
       for (let i = 0; i < oldEntries.length; i += batch) {
         const ops = oldEntries.slice(i, i + batch).map((c) => ({ action: "delete", id: c.id }));
@@ -2862,31 +3048,25 @@ module.exports = class ZoteroCite extends Plugin {
           }
         }
       }
-      // 事务偶尔会留下最后一块（文档不允许整块清空），补一遍
+      // 事务偶尔会留下最后一块（文档不允许整块清空），补一遍。
+      // 重新定位一次而不是按标题文字找：标题可能被关掉、也可能本来就没有。
       try {
-        const left = (await fetchSyncPost("/api/block/getChildBlocks", { id: docId })).data || [];
-        let at2 = -1;
-        left.forEach((c, i) => {
-          if (c && c.type === "h" && String(c.content || "").indexOf(heading) >= 0) {
-            at2 = i;
-          }
-        });
-        if (at2 >= 0 && left.length > at2 + 1) {
-          for (const c of left.slice(at2 + 1)) {
-            await fetchSyncPost("/api/block/deleteBlock", { id: c.id }).catch(() => null);
-          }
+        const after = await this.locateBib(docId, heading);
+        for (const c of after.entries) {
+          await fetchSyncPost("/api/block/deleteBlock", { id: c.id }).catch(() => null);
         }
       } catch (e) { /* 补删失败不影响主流程 */ }
     }
     await fetchSyncPost("/api/block/appendBlock", {
       parentID: docId,
       dataType: "markdown",
-      data: (idx >= 0 ? finalEntries : [`## ${heading}`, ""].concat(finalEntries)).join("\n\n"),
+      data: finalEntries.join("\n\n"),
     });
+    await this.markBibEntries(docId, finalEntries.length);
     try {
       await fetchSyncPost("/api/attr/setBlockAttrs", {
         id: docId,
-        attrs: { "custom-zotero-bibhash": myHash },
+        attrs: { "custom-zotero-bibhash": myHash, "custom-zotero-bibheading": heading },
       });
     } catch (e) { /* 属性写失败只影响下次比对精度 */ }
   }
@@ -2960,8 +3140,17 @@ module.exports = class ZoteroCite extends Plugin {
             <button class="b3-button b3-button--outline zc-openstyle">从 Zotero 已装样式里选一个…</button>
           </div>
           <div class="zc-field">
-            <div class="zc-field__label">文末标题</div>
-            <input class="b3-text-field" data-k="bibHeading" value="">
+            <div class="zc-field__label">文末标题（中文论文写「参考文献」、英文论文写 References，各家要求不同）</div>
+            <div class="zc-numrow">
+              <select class="b3-select zc-head-preset">
+                <option value="auto">自动（按样式语言）</option>
+                <option value="">不生成标题</option>
+                <option value="参考文献">参考文献</option>
+                <option value="References">References</option>
+              </select>
+              <input class="b3-text-field fn__flex-1" data-k="bibHeading" value="" placeholder="auto">
+            </div>
+            <div class="zc-field__hint">「自动」＝ CSL 样式是中文样式（GB/T 7714、CSTR 等）就写「参考文献」，其它样式写 References。选「不生成标题」则只输出文献条目，标题你自己在文档里写（也可以填任意文字）。改完点「保存」，再执行一次「重排全文」生效。</div>
           </div>
           <div class="zc-field">
             <div class="zc-field__label">文末编号样式（编号本来就由 CSL 样式决定，这里只是「跟随 / 关掉 / 覆盖」）</div>
@@ -3019,6 +3208,26 @@ module.exports = class ZoteroCite extends Plugin {
       numSel.value = cur;
       numSel.addEventListener("change", () => {
         numInput.value = numSel.value;
+      });
+    }
+
+    /*
+     * 「文末标题」预设 ↔ 输入框联动。
+     * 值就存在 bibHeading 一个字段里：auto（按样式语言）/ 空（不生成）/ 任意文字。
+     */
+    const headSel = root.querySelector(".zc-head-preset");
+    const headInput = root.querySelector('[data-k="bibHeading"]');
+    if (headSel && headInput) {
+      const cur = String(headInput.value || "");
+      if (!Array.from(headSel.options).some((o) => o.value === cur)) {
+        const o = document.createElement("option");
+        o.value = cur;
+        o.textContent = cur ? "自定义：" + cur : "不生成标题";
+        headSel.appendChild(o);
+      }
+      headSel.value = cur;
+      headSel.addEventListener("change", () => {
+        headInput.value = headSel.value;
       });
     }
 
