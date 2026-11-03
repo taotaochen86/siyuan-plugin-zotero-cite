@@ -1,4 +1,4 @@
-# Zotero Cite（思源插件）
+# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.26
 
 **简体中文** | [English](./README_en.md)
 
@@ -9,6 +9,10 @@
 在思源里插入 Zotero 文献引用，正文文本和文末参考文献表都由 Zotero 已装的 CSL 样式直接渲染，插完就是排好的学术稿。
 
 ## 2 主要功能
+
+<img src="assets/example-doc.png" alt="正文引用与文末参考文献表" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/example-doc.png'">
+
+正文那行引用和文末的「参考文献」都由 Zotero 的 CSL 样式直接渲染：换一套样式，两处一起重排，不用手改一个字。
 
 | 功能 | 说明 |
 |---|---|
@@ -127,6 +131,10 @@ Zotero 里没选中条目时只提示一句，不弹窗。
 
 ### 7.2 改已有引用（右键 5 项）
 
+在正文引用上右键，弹出的菜单长这样：
+
+<img src="assets/context-menu.png" alt="在正文引用上右键弹出的菜单" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/context-menu.png'">
+
 | 菜单项 | 作用 |
 |---|---|
 | 文献引用默认格式 | 恢复成样式自己的写法，只影响这一处 |
@@ -135,6 +143,10 @@ Zotero 里没选中条目时只提示一句，不弹窗。
 | 切换全局默认 CSL 样式… | 读 Zotero 已装样式，搜索后应用，全文按新样式重排 |
 | 定位到文末参考文献中的这条 | 滚到文末对应条目并高亮 1.9 秒，多条会全部标出 |
 | 刷新本篇 Zotero 引用 | 按当前 CSL 样式重排本篇：正文全部引用 + 文末列表，等于在右键里直接执行一次「重排全文」 |
+
+点「编辑文献引用…」打开的是这个窗口，取消勾选即从这条引用里移除；序号只给保留下来的条目排，取消后自动重排：
+
+<img src="assets/edit-dialog.png" alt="编辑文献引用窗口" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/edit-dialog.png'">
 
 - 单击引用 = 跳 Zotero（多条目同时选中）
 - 删除整处引用：直接删掉正文那段文本，或「编辑文献引用」里取消全部勾选
@@ -172,3 +184,49 @@ Zotero 里没选中条目时只提示一句，不弹窗。
 7. **文末编号默认跟随 CSL 样式**：数字式样式会带 `[1]` / `1.`（`1. ` 会写成转义形式防止被当成有序列表），作者年样式本来就没有编号。设置里可改为「不显示编号」或自定义模板（`{n}` 为序号占位）。投稿前请按期刊要求核对
 8. **换机需重配**：Debug Bridge 与 token 都要重装重填
 9. **性能随文档规模下降**：引文很多的长文档，一次重排逐块读写，会明显停顿。**建议单篇文档不超过 10 万字、引用不超过 300 条**
+
+---
+
+## 9 技术实现（附录）
+
+| 环节 | 做法 |
+|---|---|
+| 与 Zotero 通信 | 直连本机 `http://127.0.0.1:23119/debug-bridge/execute`，把一小段 JS 送进 Zotero 执行，取回条目元数据、已装 CSL 样式、渲染好的引文串。没有中间进程，也没有中转服务 |
+| 引用落地形态 | 一条普通 markdown 链接 `[(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)`，链接本身是唯一数据源（详见 7.4） |
+| 正文渲染 | 交给 Zotero 里已装的 CSL 样式渲染，正文串与文末串同源；换样式时两处一起重排 |
+| 文末列表 | 定位「参考文献」标题，重建标题之后的区块；条目链接带 `?bib=1`，重排时跳过，已删文献不会复活 |
+| 撤销 | 每篇文档独立栈、20 步，写回走内核 `/api/transactions` |
+| 运行环境 | 思源桌面端渲染进程（有 Node）；网页版与移动端没有 23119 端口，用不了 |
+| 代码结构 | 单文件 `index.js`：插件主类 + 三个 Dialog + 右键菜单 + 设置页；`index.css` 只负责版式，颜色全部取思源 CSS 变量，浅色 / 深色主题自动跟随 |
+
+## 10 构建与发布（开发者）
+
+```
+node --check index.js      # 语法自查
+bash scripts/preflight.sh  # 发版体检：清单、版本号、必需文件、图标、包结构
+bash scripts/build.sh      # 产出 package.zip
+bash scripts/release.sh    # 需要 GH_TOKEN，建 Release 并上传 package.zip
+```
+
+- `package.zip` 里的文件**必须直接在 zip 根层**，套一层同名目录会导致集市安装后不加载
+- `plugin.json` 的 `version`、README 标题里的版本号、GitHub Release 的 tag 三者保持一致
+- 发布：Release 的 tag 写版本号（如 `v1.2.26`），附件放 `package.zip`
+- 上架：集市仓库 `siyuan-note/bazaar` 的 `plugins.txt` 里已有本仓库，Action 会按 `plugin.json` 的版本重新生成索引，日常发版不需要再提 PR
+
+## 11 许可
+
+MIT License © 2026 Chen Taotao
+
+---
+
+## 版本史
+
+| 版本 | 日期 | 主要变化 |
+|---|---|---|
+| 1.2.26 | 2026-11-03 | 三个对话框版式重做：说明条 + 卡片列表 + 序号徽标 + 自绘复选框，左右留白，深色主题跟随；补集市封面与 README 配图 |
+| 1.2.25 | 2026-11-01 | 点击监听收窄，不再吞掉 Zotero 批注回跳链接 |
+| 1.2.24 | 2026-11-01 | 300 条引用的性能优化（指纹 / 事务删除 / 并发预读），相邻引用自动合并 |
+| 1.2.19 | 2026-11-01 | 切换形态只改一处、文末编号交回 CSL、右键加「刷新本篇」 |
+| 1.2.14 | 2026-11-01 | 插入改为直接用 Zotero 当前选中项，不再弹窗 |
+| 1.2.11 | 2026-10-31 | 新增 `/zotero` 斜杠命令入口 |
+| 1.2.10 | 2026-10-31 | 首个发布版：经 Zotero Debug Bridge 插入 CSL 引用与参考文献表 |

@@ -1466,7 +1466,11 @@ module.exports = class ZoteroCite extends Plugin {
     }
     const dlg = new Dialog({
       title: "插入 Zotero 文献引用",
-      content: `<div class="zc-dlg" style="min-height:220px">
+      content: `<div class="zc-dlg zc-insert">
+        <div class="zc-note">
+          <svg class="zc-note__ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.3V11.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".85" fill="currentColor"/></svg>
+          <span class="zc-note__text">勾选要插入的条目　勾多条会合并成一条引用；「追加」把 Zotero 当前选中并入列表</span>
+        </div>
         <div class="zc-bar">
           <label>样式</label>
           <select class="b3-select zc-style"><option value="${this.settings.styleId}">${this.settings.styleId.split("/").pop()}</option></select>
@@ -1480,13 +1484,13 @@ module.exports = class ZoteroCite extends Plugin {
           <input class="b3-text-field fn__flex-1 zc-q" placeholder="在 Zotero 库里搜索（回车）" />
           <button class="b3-button b3-button--outline zc-go">搜索</button>
         </div>
-        <div class="zc-list" style="max-height:320px;overflow:auto"></div>
+        <div class="zc-list"></div>
         <div class="zc-foot">
           <span class="zc-tip"></span>
           <button class="b3-button b3-button--outline zc-checkall">全选/全不选</button>
           <button class="b3-button b3-button--outline zc-addsel">追加 Zotero 选中</button>
           <button class="b3-button b3-button--cancel zc-cancel">取消</button>
-          <button class="b3-button b3-button--text zc-insert">插入引用</button>
+          <button class="b3-button zc-btn-primary zc-insert">插入引用</button>
         </div>
       </div>`,
       width: "720px",
@@ -1533,14 +1537,21 @@ module.exports = class ZoteroCite extends Plugin {
         tipEl.textContent = "已勾选 0 条";
         return;
       }
-      listEl.innerHTML = pool.map((r, i) => `
-        <label class="zc-item${r.keep ? "" : " zc-item--off"}">
+      let ord = 0;
+      listEl.innerHTML = pool.map((r, i) => {
+        if (r.keep) {
+          ord += 1;
+        }
+        return `
+        <label class="zc-item ${r.keep ? "zc-item--on" : "zc-item--off"}">
+          <span class="zc-ord">${r.keep ? ord : ""}</span>
           <input type="checkbox" class="zc-cb" data-i="${i}" ${r.keep ? "checked" : ""} />
           <div class="zc-meta">
             <div class="zc-title">${String(r.title || "(无题名)").replace(/</g, "&lt;")}</div>
             <div class="zc-sub">${String(r.sub || "").replace(/</g, "&lt;")}</div>
           </div>
-        </label>`).join("");
+        </label>`;
+      }).join("");
       listEl.querySelectorAll(".zc-cb").forEach((cb) => {
         cb.addEventListener("change", () => {
           pool[Number(cb.getAttribute("data-i"))].keep = cb.checked;
@@ -2054,7 +2065,10 @@ module.exports = class ZoteroCite extends Plugin {
     const dlg = new Dialog({
       title: "编辑文献引用",
       content: `<div class="zc-dlg zc-edit">
-        <div class="zc-edit__hint">取消勾选＝从这条引用里删掉；点「追加」或搜索可加新条目。保存后自动重排。</div>
+        <div class="zc-note">
+          <svg class="zc-note__ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.3V11.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".85" fill="currentColor"/></svg>
+          <span class="zc-note__text"></span>
+        </div>
         <div class="zc-edit__list"></div>
         <div class="zc-search">
           <input class="b3-text-field fn__flex-1 zc-q" placeholder="在 Zotero 库里搜索并添加（回车）" />
@@ -2062,12 +2076,12 @@ module.exports = class ZoteroCite extends Plugin {
         </div>
         <div class="zc-foot">
           <span class="zc-tip"></span>
-          <button class="b3-button b3-button--cancel zc-cancel">取消</button>
           <button class="b3-button b3-button--outline zc-addsel">追加 Zotero 选中</button>
-          <button class="b3-button b3-button--text zc-ok">保存</button>
+          <button class="b3-button b3-button--cancel zc-cancel">取消</button>
+          <button class="b3-button zc-btn-primary zc-ok">保存</button>
         </div>
       </div>`,
-      width: "640px",
+      width: "680px",
       destroyCallback: () => {},
     });
 
@@ -2075,20 +2089,31 @@ module.exports = class ZoteroCite extends Plugin {
     const listEl = el.querySelector(".zc-edit__list");
     const tipEl = el.querySelector(".zc-tip");
     const qEl = el.querySelector(".zc-q");
+    const noteEl = el.querySelector(".zc-note__text");
 
     const render = () => {
       if (!rows.length) {
+        noteEl.textContent = "这一处已经没有条目了";
         listEl.innerHTML = `<div class="zc-empty">这一处没有条目了。保存后会连引用一起删掉。</div>`;
         return;
       }
-      listEl.innerHTML = rows.map((r, i) => `
-        <label class="zc-item${r.keep ? "" : " zc-item--off"}">
+      const keepCount = rows.filter(r => r.keep).length;
+      noteEl.innerHTML = `共 <b>${rows.length}</b> 条 · 保留 <b>${keepCount}</b> 条　取消勾选即移除，保存后正文自动重排`;
+      let ord = 0;
+      listEl.innerHTML = rows.map((r, i) => {
+        if (r.keep) {
+          ord += 1;
+        }
+        return `
+        <label class="zc-item ${r.keep ? "zc-item--on" : "zc-item--off"}">
+          <span class="zc-ord">${r.keep ? ord : ""}</span>
           <input type="checkbox" class="zc-cb" data-i="${i}" ${r.keep ? "checked" : ""} />
           <div class="zc-meta">
             <div class="zc-title">${String(r.title || "(无题名)").replace(/</g, "&lt;")}</div>
             <div class="zc-sub">${String(r.sub || "").replace(/</g, "&lt;")}</div>
           </div>
-        </label>`).join("");
+        </label>`;
+      }).join("");
       listEl.querySelectorAll(".zc-cb").forEach((cb) => {
         cb.addEventListener("change", () => {
           rows[Number(cb.getAttribute("data-i"))].keep = cb.checked;
@@ -2190,18 +2215,21 @@ module.exports = class ZoteroCite extends Plugin {
     const dlg = new Dialog({
       title: "切换全局默认 CSL 样式",
       content: `<div class="zc-dlg zc-pick">
-        <div class="zc-edit__hint">切换后本文所有引用与文末列表都会按新样式重排。Zotero 里已装 ${styles.length} 个样式。</div>
+        <div class="zc-note">
+          <svg class="zc-note__ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.3V11.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".85" fill="currentColor"/></svg>
+          <span class="zc-note__text">Zotero 里已装 <b>${styles.length}</b> 个样式　切换后本文所有引用与文末列表都会按新样式重排</span>
+        </div>
         <div class="zc-search">
           <input class="b3-text-field fn__flex-1 zc-filter" placeholder="输入样式名过滤，如 GB/T、APA、IEEE" />
         </div>
-        <div class="zc-list zc-styles" style="max-height:340px;overflow:auto"></div>
+        <div class="zc-list zc-styles"></div>
         <div class="zc-foot">
           <span class="zc-tip"></span>
           <button class="b3-button b3-button--cancel zc-cancel">取消</button>
-          <button class="b3-button b3-button--text zc-ok">应用并重排</button>
+          <button class="b3-button zc-btn-primary zc-ok">应用并重排</button>
         </div>
       </div>`,
-      width: "620px",
+      width: "660px",
       destroyCallback: () => {},
     });
 

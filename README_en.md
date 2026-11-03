@@ -1,4 +1,4 @@
-# Zotero Cite (SiYuan plugin)
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.26
 
 **English** | [简体中文](./README.md)
 
@@ -9,6 +9,10 @@
 Insert Zotero citations into SiYuan — both the in-text citation and the bibliography are rendered by the CSL style you already use in Zotero, so what you get is submission-ready text.
 
 ## 2 What it does
+
+<img src="assets/example-doc.png" alt="In-text citation and the generated bibliography" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/example-doc.png'">
+
+Both the in-text citation and the bibliography at the bottom are rendered directly by the CSL style installed in Zotero. Switch styles once and both sides are re-paginated — no manual editing.
 
 | Feature | Detail |
 |---|---|
@@ -125,6 +129,10 @@ If nothing is selected in Zotero you get a one-line hint, never a dialog.
 
 ### 7.2 Edit an existing citation (right-click, 6 items)
 
+Right-click an in-text citation and you get this menu:
+
+<img src="assets/context-menu.png" alt="Right-click menu on an in-text citation" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/context-menu.png'">
+
 | Menu item | Effect |
 |---|---|
 | Default citation form | Restores the style's own rendering; this citation only |
@@ -132,6 +140,10 @@ If nothing is selected in Zotero you get a one-line hint, never a dialog.
 | Edit references… (add or remove) | Lists every item of this citation — untick to remove; append the current Zotero selection or add by keyword search |
 | Change document CSL style… | Reads styles installed in Zotero, applies your pick, re-renders the whole document |
 | Locate this entry in the bibliography | Scrolls to the entry and highlights it for 1.9 s; all items get highlighted |
+
+"Edit references…" opens the window below. Unticking an item drops it from this citation; numbers are only assigned to the items you keep, and they renumber as you untick:
+
+<img src="assets/edit-dialog.png" alt="Edit references window" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/edit-dialog.png'">
 
 - Single click = jump to Zotero (all items selected)
 - To delete a citation, delete the text, or untick everything in "Edit references"
@@ -169,3 +181,49 @@ An in-text citation is just a markdown link:
 7. **Bibliography numbering follows the CSL style by default** — numeric styles produce `[1]` / `1.` (a leading `1. ` is written in escaped form so markdown does not turn it into an ordered list); author-date styles have none. You can switch to "no numbering" or a custom template (`{n}` = sequence) in settings. Check your journal's requirement before submission
 8. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
 9. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**
+
+---
+
+## 9 How it works (appendix)
+
+| Step | Approach |
+|---|---|
+| Talking to Zotero | Talks to `http://127.0.0.1:23119/debug-bridge/execute` directly, running a small piece of JS inside Zotero to fetch item metadata, installed CSL styles and the rendered citation string. No helper process, no proxy service |
+| What a citation is | An ordinary markdown link `[(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)`; the link itself is the single source of truth (see 7.4) |
+| Citation text | Rendered by the CSL style installed in Zotero; in-text and bibliography strings come from the same source and are re-rendered together when the style changes |
+| Bibliography | Finds the "参考文献" heading and rebuilds everything after it; entry links carry `?bib=1` and are skipped on re-render, so deleted references never come back |
+| Undo | One stack per document, 20 steps, written back through the kernel `/api/transactions` API |
+| Runtime | SiYuan desktop renderer (Node available); the web and mobile clients have no port 23119 and cannot use it |
+| Code layout | A single `index.js`: plugin class + three dialogs + right-click menu + settings page; `index.css` only handles layout and takes every color from SiYuan CSS variables, so light and dark themes follow automatically |
+
+## 10 Build and release (developers)
+
+```
+node --check index.js      # syntax check
+bash scripts/preflight.sh  # manifest, versions, required files, icon, package layout
+bash scripts/build.sh      # produce package.zip
+bash scripts/release.sh    # needs GH_TOKEN, creates the Release and uploads package.zip
+```
+
+- Files inside `package.zip` **must sit at the zip root**; wrapping them in a same-named folder makes the marketplace install load nothing
+- Keep `plugin.json` `version`, the version in the README title and the GitHub Release tag in sync
+- Publishing: create a Release tagged with the version (e.g. `v1.2.26`) and attach `package.zip`
+- Listing: the repository is already in `plugins.txt` of `siyuan-note/bazaar`; the Action regenerates the index from `plugin.json`, so routine releases need no new PR
+
+## 11 License
+
+MIT License © 2026 Chen Taotao
+
+---
+
+## Version history
+
+| Version | Date | Highlights |
+|---|---|---|
+| 1.2.26 | 2026-11-03 | All three dialogs redesigned: note bar + card list + numbered badges + custom checkboxes, side padding, follows dark theme; marketplace cover and README screenshots added |
+| 1.2.25 | 2026-11-01 | Narrowed click handling so Zotero annotation back-links are no longer swallowed |
+| 1.2.24 | 2026-11-01 | Performance work for 300 citations (fingerprint / transaction deletes / concurrent prefetch) and automatic merging of adjacent citations |
+| 1.2.19 | 2026-11-01 | Switching form touches one citation only, numbering goes back to CSL, "refresh this document" added to the menu |
+| 1.2.14 | 2026-11-01 | Insert now uses the current Zotero selection directly, no dialog |
+| 1.2.11 | 2026-10-31 | `/zotero` slash command added |
+| 1.2.10 | 2026-10-31 | First release: insert CSL citations and a bibliography through the Zotero Debug Bridge |

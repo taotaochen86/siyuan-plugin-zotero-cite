@@ -23,6 +23,9 @@ done < <(node -e "const r=require('./plugin.json').readme||{};console.log([...ne
 [ -f icon.svg ] && FILES+=(icon.svg)
 [ -f LICENSE ] && FILES+=(LICENSE)
 [ -d i18n ] && FILES+=(i18n)
+# 集市详情页顶部大图 + README 里引用的配图
+[ -f preview.png ] && FILES+=(preview.png)
+[ -d assets ] && FILES+=(assets)
 
 for f in "${FILES[@]}"; do
     [ -e "$f" ] || { echo "缺少文件: $f" >&2; exit 1; }
