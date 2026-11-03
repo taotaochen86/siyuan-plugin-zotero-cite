@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.26
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.27
 
 **English** | [简体中文](./README.md)
 
@@ -212,7 +212,7 @@ bash scripts/release.sh    # needs GH_TOKEN, creates the Release and uploads pac
 
 ## 11 License
 
-MIT License © 2026 Chen Taotao
+MIT License © 2026 ttChen
 
 ---
 
@@ -220,6 +220,7 @@ MIT License © 2026 Chen Taotao
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.27 | 2026-11-03 | Author name unified to ttChen (plugin.json / package.json / LICENSE / README) |
 | 1.2.26 | 2026-11-03 | All three dialogs redesigned: note bar + card list + numbered badges + custom checkboxes, side padding, follows dark theme; marketplace cover and README screenshots added |
 | 1.2.25 | 2026-11-01 | Narrowed click handling so Zotero annotation back-links are no longer swallowed |
 | 1.2.24 | 2026-11-01 | Performance work for 300 citations (fingerprint / transaction deletes / concurrent prefetch) and automatic merging of adjacent citations |

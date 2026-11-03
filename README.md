@@ -1,4 +1,4 @@
-# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.26
+# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.27
 
 **简体中文** | [English](./README_en.md)
 
@@ -215,7 +215,7 @@ bash scripts/release.sh    # 需要 GH_TOKEN，建 Release 并上传 package.zip
 
 ## 11 许可
 
-MIT License © 2026 Chen Taotao
+MIT License © 2026 ttChen
 
 ---
 
@@ -223,6 +223,7 @@ MIT License © 2026 Chen Taotao
 
 | 版本 | 日期 | 主要变化 |
 |---|---|---|
+| 1.2.27 | 2026-11-03 | 作者名统一为 ttChen（plugin.json / package.json / LICENSE / README） |
 | 1.2.26 | 2026-11-03 | 三个对话框版式重做：说明条 + 卡片列表 + 序号徽标 + 自绘复选框，左右留白，深色主题跟随；补集市封面与 README 配图 |
 | 1.2.25 | 2026-11-01 | 点击监听收窄，不再吞掉 Zotero 批注回跳链接 |
 | 1.2.24 | 2026-11-01 | 300 条引用的性能优化（指纹 / 事务删除 / 并发预读），相邻引用自动合并 |
