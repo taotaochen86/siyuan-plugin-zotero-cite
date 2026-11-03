@@ -1,4 +1,4 @@
-# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.28
+# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.29
 
 **简体中文** | [English](./README_en.md)
 
@@ -223,6 +223,7 @@ MIT License © 2026 ttChen
 
 | 版本 | 日期 | 主要变化 |
 |---|---|---|
+| 1.2.29 | 2026-11-04 | 封面重做以通过集市校验：去掉网格、简化背景、画布 1376×800，`preview.png` 从 935KB 压到 485KB（上限 512KB）；preflight 增加封面体积检查 |
 | 1.2.28 | 2026-11-03 | 集市封面换成真实文档截图（正文引用 + 文末文献表），卡片加内边距与底部渐隐 |
 | 1.2.27 | 2026-11-03 | 作者名统一为 ttChen（plugin.json / package.json / LICENSE / README） |
 | 1.2.26 | 2026-11-03 | 三个对话框版式重做：说明条 + 卡片列表 + 序号徽标 + 自绘复选框，左右留白，深色主题跟随；补集市封面与 README 配图 |

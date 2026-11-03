@@ -74,6 +74,18 @@ if (w < 256 || h < 256) { console.log(`  FAIL icon.png 只有 ${w}x${h}，集市
 console.log(`  ok   icon.png ${w}x${h}`);
 ' || FAIL=$((FAIL + 1))
 
+echo "== 5b. 集市封面体积（上限 512 KB） =="
+node -e '
+const fs = require("fs");
+if (!fs.existsSync("preview.png")) { console.log("  warn 没有 preview.png，集市详情页顶部会空白"); process.exit(0); }
+const b = fs.readFileSync("preview.png");
+if (b.slice(1, 4).toString() !== "PNG") { console.log("  FAIL preview.png 不是 PNG"); process.exit(1); }
+const kb = b.length / 1024;
+const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
+if (kb > 512) { console.log(`  FAIL preview.png ${kb.toFixed(1)}KB 超过集市 512KB 上限（${w}x${h}）`); process.exit(1); }
+console.log(`  ok   preview.png ${w}x${h} ${kb.toFixed(1)}KB`);
+' || FAIL=$((FAIL + 1))
+
 echo "== 6. package.zip 结构（若已构建） =="
 if [ -f package.zip ]; then
     if unzip -l package.zip | awk 'NR>3 && $4 != "" {print $4}' | grep -q "^[^/]*/$"; then

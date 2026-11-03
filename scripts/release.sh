@@ -41,6 +41,7 @@ const p = JSON.stringify({
   body: process.env.BODY,
   draft: false,
   prerelease: false,
+  make_latest: "true",
 });
 process.stdout.write(p);
 ')"
