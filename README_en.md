@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.31
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.32
 
 **English** | [简体中文](./README.md)
 
@@ -221,6 +221,7 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.32 | 2026-11-04 | Default style pinned to APA, which ships with every Zotero install, so first use can no longer fail on a missing style; a style missing on this machine now refuses to refresh (instead of silently swapping in another style) and the settings panel shows a red warning plus a one-click "use the built-in APA" button |
 | 1.2.31 | 2026-11-04 | Setup guide moved to a new domain (`ttchen.cn42.ug.link`, the old luyouxia tunnel was unstable); added a "Plugin settings…" item to the citation context menu |
 | 1.2.30 | 2026-11-04 | Bibliography heading is now "Auto" (参考文献 / References from the CSL style language, or none at all, or custom); entries are located by the `custom-zotero-bib` block attribute, so renaming or deleting the heading no longer duplicates the list |
 | 1.2.29 | 2026-11-04 | Cover rebuilt to pass the bazaar check: grid removed, background simplified, canvas 1376×800, `preview.png` down from 935KB to 485KB (limit 512KB); preflight now checks cover size |

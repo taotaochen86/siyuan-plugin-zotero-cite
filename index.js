@@ -33,6 +33,15 @@ const BIB_ATTR = "custom-zotero-bib";
 const DEFAULT_SETTINGS = {
   bridgeUrl: "http://127.0.0.1:23119/debug-bridge/execute",
   token: "",
+  // 默认样式只用「Zotero 全新安装就自带」的样式，绝不指向需要另下载的 csl。
+  //   Zotero 7 的预置样式打在安装包 omni.ja 的 styles/ 里，共 15 个：
+  //     ACS / AMA / APSA / ASA / APA 7 / Chicago (author-date, notes-bibliography,
+  //     shortened notes) / Elsevier Harvard / Cite Them Right Harvard / IEEE /
+  //     MHRA / MLA / Nature / NLM(Vancouver)
+  //   ⚠️ GB/T 7714 系列、CSTR、各中文期刊样式都不在预置里，是「从样式库添加」的，
+  //      换电脑不会自动出现 —— 拿它当默认，用户在新机器上一上来就会被拒绝重排。
+  //   选 APA：它是预置项里唯一通用且带作者年制的（与国内学位论文常见的
+  //   「(张三等, 2024)」形态一致）；要顺序编码制就在设置里换 IEEE 或 Nature。
   styleId: "http://www.zotero.org/styles/apa",
   defaultFormat: "csl",
   // 文末标题。三种取值：
@@ -244,7 +253,11 @@ async function zoteroExec(settings, code) {
   if (v && v.error) {
     throw new Error(v.error === "no-items"
       ? "这些条目在 Zotero 里找不到（可能已删除或换了库）：" + (v.missing || []).join(", ")
-      : String(v.error));
+      : v.error === "style-missing"
+        ? "本机 Zotero 里没有这个 CSL 样式：" + v.wanted +
+          "。自定义样式不随 Zotero 账号同步，换电脑要手动把 .csl 装到本机；" +
+          "或在插件设置里换一个已装样式。本机现有样式：" + (v.available || []).join(" / ")
+        : String(v.error));
   }
   return v;
 }
@@ -351,7 +364,21 @@ const lib = Zotero.Libraries.userLibraryID;
 const items = P.keys.map(function (k) { return Zotero.Items.getByLibraryAndKey(lib, k); })
                    .filter(function (x) { return !!x; });
 if (!items.length) { return JSON.stringify({error: "no-items", missing: P.keys}); }
-const style = Zotero.Styles.get(P.styleId) || Zotero.Styles.getVisible()[0];
+/*
+ * 样式必须真实存在，找不到就报错退出 —— 不做静默回退。
+ * ⚠️ 这里以前写成 Styles.get(styleId) || Styles.getVisible()[0]：
+ *    换电脑后自定义样式（比如 syau-thesis 沈农学位论文）没装，就会悄悄换成
+ *    可见列表第一个（本机是 ACS Guide 2026），把全篇正文与文末格式改掉，
+ *    还不报错。宁可拒绝重排，也不能替用户换样式。
+ */
+const style = Zotero.Styles.get(P.styleId);
+if (!style) {
+  return JSON.stringify({
+    error: "style-missing",
+    wanted: P.styleId,
+    available: Zotero.Styles.getVisible().slice(0, 8).map(function (s) { return s.title || s.styleID; })
+  });
+}
 const csl = style.getCiteProc();
 csl.setOutputFormat("html");
 csl.updateItems(items.map(function (i) { return i.id; }));
@@ -3101,6 +3128,58 @@ module.exports = class ZoteroCite extends Plugin {
     this.updateSettings(patch);
   }
 
+  /**
+   * 设置面板里那条「样式在本机装没装」的提示。
+   *
+   * ⚠️ 为什么要专门查一次：自定义 CSL 样式是**本机文件**，不随 Zotero 账号同步。
+   *    换电脑后样式 id 还在设置里，但那台机没这个样式 → 以前会静默换成可见列表
+   *    第一个样式把全篇重排掉。现在重排会直接报错，这里提前一句话告诉用户。
+   *    查不到（Zotero 没开 / 没令牌）时只提示「无法确认」，不误报成缺样式。
+   */
+  async updateStyleStat() {
+    const root = this._settingEl;
+    if (!root) {
+      return;
+    }
+    const el = root.querySelector("[data-style-stat]");
+    if (!el) {
+      return;
+    }
+    const input = root.querySelector('[data-k="styleId"]');
+    const fixRow = root.querySelector("[data-style-fix]");
+    const sid = String((input && input.value) || "").trim();
+    const paint = (cls, text, showFix) => {
+      el.className = "zc-stylestat " + cls;
+      el.textContent = text;
+      // 只有「确实没有」或「没填」才给一键修复按钮；
+      // 「Zotero 未连接」是不知道，不能给按钮（按了也没法确认）。
+      if (fixRow) {
+        fixRow.classList.toggle("fn__none", !showFix);
+      }
+    };
+    if (!sid) {
+      paint("is-bad", "还没填样式，重排与插入都会被拒绝", true);
+      return;
+    }
+    paint("is-wait", "检查本机是否装了该样式…", false);
+    let r = null;
+    try {
+      r = await zoteroExec(this.settings,
+        `const s = Zotero.Styles.get(${JSON.stringify(sid)});
+return JSON.stringify({ok: !!s, title: s ? s.title : null});`);
+    } catch (e) {
+      // Zotero 没启动 / 令牌不对：属于「不知道」，不是「没有」
+      paint("is-unk", "无法确认（Zotero 未连接）：" + String(e.message || e).slice(0, 90), false);
+      return;
+    }
+    if (r && r.ok) {
+      paint("is-ok", "✓ 本机 Zotero 已装：" + (r.title || sid), false);
+    } else {
+      paint("is-bad", "✗ 本机 Zotero 没有这个样式，重排与插入会被拒绝。" +
+        "换电脑后要把 .csl 装到本机，或点下面按钮改用 Zotero 自带样式。", true);
+    }
+  }
+
   settingRender() {
     const html = `
       <div class="zc-setting">
@@ -3144,6 +3223,10 @@ module.exports = class ZoteroCite extends Plugin {
           <div class="zc-field">
             <div class="zc-field__label">CSL 样式（正文引用与文末列表的格式都由它决定）</div>
             <input class="b3-text-field" data-k="styleId" value="" placeholder="http://www.zotero.org/styles/apa">
+            <div class="zc-stylestat" data-style-stat></div>
+            <div class="zc-fixrow fn__none" data-style-fix>
+              <button class="b3-button b3-button--outline zc-useapa">改用 Zotero 自带样式（APA）</button>
+            </div>
           </div>
           <div class="zc-field">
             <button class="b3-button b3-button--outline zc-openstyle">从 Zotero 已装样式里选一个…</button>
@@ -3287,5 +3370,29 @@ module.exports = class ZoteroCite extends Plugin {
         await this.openStylePicker(null);
       });
     }
+
+    /* 打开面板就查一次样式；改完样式 id 再查一次（change = 失焦，不会边打字边发请求） */
+    const styleInput = root.querySelector('[data-k="styleId"]');
+    if (styleInput) {
+      styleInput.addEventListener("change", () => { this.updateStyleStat(); });
+    }
+
+    /*
+     * 一键修复：样式在本机不存在时（最常见于思源把配置同步到了另一台电脑），
+     * 直接把样式换成 Zotero 全新安装就自带的 APA，用户不用去记样式 id 或找 .csl。
+     */
+    const useApa = root.querySelector(".zc-useapa");
+    if (useApa) {
+      useApa.addEventListener("click", async () => {
+        const fallback = DEFAULT_SETTINGS.styleId;
+        if (styleInput) {
+          styleInput.value = fallback;
+        }
+        await this.updateSettings({ styleId: fallback });
+        await this.updateStyleStat();
+        showMessage("已改用 Zotero 自带样式：APA Style 7th edition");
+      });
+    }
+    this.updateStyleStat();
   }
 };
