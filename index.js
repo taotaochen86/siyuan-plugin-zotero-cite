@@ -20,6 +20,28 @@
 
 const { Plugin, Setting, Dialog, showMessage, fetchSyncPost } = require("siyuan");
 
+/**
+ * 静默调用内核 API —— 与 fetchSyncPost 等价，但**失败不弹提示**。
+ *
+ * ⚠️ 思源的 fetchSyncPost 在内核返回 code !== 0 时会自己弹一条「<msg> v<版本>」。
+ *    对「尽力而为」的写操作（补删可能已经不存在的块、补写标题、打标记）来说，
+ *    失败本来就在预期内，弹出来只会吓用户：2026-11-04 用户重排时看到的一串
+ *    「tree not found v3.8.9」就是补删已删块时由 fetchSyncPost 弹出来的。
+ *    这类调用一律走这里，自己看 code 决定后续。
+ */
+async function apiQuiet(path, payload) {
+  try {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+    return await r.json();
+  } catch (e) {
+    return null;
+  }
+}
+
 /* ============================ 常量 ============================ */
 
 /**
@@ -298,30 +320,30 @@ function stripBlockAttrs(kd) {
 /**
  * 判断一段 kramdown 的块属性是不是「已经脏了」。
  *
- * 正常的 kramdown 只会有**一组**属性，且紧贴在最末尾：
- *   `[..](..){: id="…" updated="…"}`
+ * 思源自己写出来的属性只有两种合法位置：
+ *   · 行首/行尾独占：`正文\n{: id="…" updated="…"}`
+ *   · 紧跟在列表、引用标记后面：`- {: id="…"}正文` / `> {: id=…}内容`
  *
- * 出问题时会出现两种形态，都属于脏：
- *   · 出现两组以上（正文里残留一组 + 思源又补了一组）
- *   · 某一组后面还跟着正文（说明它被当成文字了）
+ * ⚠️ 不能再用「出现两组以上就算脏」：列表块和列表项块天生就带多组属性 ——
+ *    `i` 块的 kramdown 是 `- {: id="…"}列表项甲\n  {: id="…"}`，`l` 块里
+ *    每个子项都带一组。旧判据把它们永远判成脏，于是**每重排一次就白写一遍**
+ *    （2026-11-04 实测：列表里带引用的文档每次 updated 都多 2，永远不收敛）。
  *
- * 为什么需要这个判定：剥离属性后新旧内容会变得一样，只靠内容比较永远判不出
- * 「该不该写一次去清理」，脏文本就会一直留着。
+ * 真正脏的形态是「属性前面还压着正文」，例如历史上出现过的
+ * `Zhang et al. (2020)}{: id="…" updated="…"}` —— 那一组的前面不是空白、
+ * 也不是列表/引用标记，说明它已经变成正文文字了，必须写一次清掉。
  */
 function attrsAreDirty(kd) {
   const s = String(kd || "");
-  const groups = s.match(/\{:[^{}\n]*\}/g) || [];
-  if (!groups.length) {
-    return false;
+  const re = /\{:[^{}\n]*\}/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const lineStart = s.lastIndexOf("\n", m.index) + 1;
+    const head = s.slice(lineStart, m.index);
+    if (!/^[\s>*+\-–—\d.、)）|]*$/.test(head)) {
+      return true;
+    }
   }
-  if (groups.length > 1) {
-    return true;
-  }
-  const tail = s.trimEnd();
-  if (!tail.endsWith(groups[0])) {
-    return true;
-  }
-  // 唯一一组贴在最末尾，但它前面同一行还有别的 `{:`? （不可能，上面已限一组）
   return false;
 }
 
@@ -820,7 +842,13 @@ function collapseCiteMarkup(kd) {
    */
   let lastUrl = null;
   let lastEnd = -1;
-  const unit = /(\u200b|\*|\s)*(<sup>)?[\s\*]*(\[[^\]\n]*\]\(zotero:\/\/select\/library\/items\/[A-Za-z0-9]+[^)\s]*\))[\s\*]*(<\/sup>)?[\s\*]*/g;
+  /*
+   * ⚠️ 这里的空白只能用「行内空白」[ \t\u00a0]，不能用 \s。
+   *    \s 会把换行也吃掉：列表块里两个列表项之间是空行，一旦被吞掉，
+   *    整个列表块每次重排都会被判成「内容变了」（写回去思源又补回空行），
+   *    表现为列表里带引用的文档永远不幂等、每次 updated 都多 1（2026-11-04 实测）。
+   */
+  const unit = /([ \t\u00a0\u200b]|\*)*(<sup>)?[ \t\*]*(\[[^\]\n]*\]\(zotero:\/\/select\/library\/items\/[A-Za-z0-9]+[^)\s]*\))[ \t\*]*(<\/sup>)?[ \t\*]*/g;
   // 分组 1..4，offset 在第 5 个参数
   const s = String(kd || "").replace(unit, (full, pre, s1, link, s2, offset) => {
     const um = /\((zotero:\/\/[^)\s]*)\)/.exec(link);
@@ -1383,7 +1411,14 @@ module.exports = class ZoteroCite extends Plugin {
     this.addCommand({
       langKey: "refreshCites",
       hotkey: "",
-      callback: () => this.refreshDocument(true),
+      /*
+       * ⚠️ 必须自己接住异常。命令面板的 callback 没有任何人 await，
+       *    缺样式 / Zotero 没开时 refreshDocument 会抛（这正是「拒绝重排」的设计），
+       *    不接就是一条 unhandled rejection —— 用户点完什么提示都没有，
+       *    只会觉得「点了没反应」。这是 1.2.32 之前命令面板入口的静默失败。
+       */
+      callback: () => this.refreshDocument(true)
+        .catch((e) => showMessage(String((e && e.message) || e), 9000)),
     });
     this.addCommand({
       langKey: "cycleCiteFormat",
@@ -2761,7 +2796,7 @@ module.exports = class ZoteroCite extends Plugin {
     //    ⚠️ 顺序很重要：clusters 必须同时覆盖「全文分组」和「每块分组」。
     //       只按全文分组会漏 —— 全文导出与块内 kramdown 在换行/零宽字符上不完全一致，
     //       一旦块内分组结果不在 clusters 里，渲染取不到，正文就会变成 `[?]`。
-    const rows = await this.querySql(
+    const rowsSql = await this.querySql(
       `SELECT id FROM blocks WHERE root_id='${docId}' AND type IN ('p','h','l','i','b','s','t') ORDER BY sort`
     );
     /*
@@ -2779,6 +2814,26 @@ module.exports = class ZoteroCite extends Plugin {
         bibIds.add(loc.children[loc.headingIndex].id);
       }
     } catch (e) { /* 取不到就按没有文末处理 */ }
+
+    /*
+     * ⚠️ SQL 有索引延迟：刚插进去的块常常还查不到（实测新加一段后 0.8 秒仍为 0 行，
+     *    新建文档更慢）。只信 SQL 就会漏掉「用户刚插入的那条引用」—— 表现为
+     *    重排报告扫到 N 条、却 updated 0，新引用一直停在 [pending]/原文字上。
+     *    这里再用 getChildBlocks 补一遍：它读的是内存块树，没有索引延迟。
+     *    顺序上 SQL 结果在前、补的在后；渲染是按 cluster 键查表，与块顺序无关，
+     *    真正决定编号顺序的是全文 markdown 的分组结果，所以这样补不会打乱编号。
+     */
+    const seenIds = new Set(rowsSql.map((r) => r.id));
+    let rows = rowsSql;
+    try {
+      const kids = ((await fetchSyncPost("/api/block/getChildBlocks", { id: docId })) || {}).data || [];
+      const extra = kids
+        .filter((k) => k && k.id && !seenIds.has(k.id) && /^(p|h|l|i|b|s|t)$/.test(k.type || ""))
+        .map((k) => ({ id: k.id }));
+      if (extra.length) {
+        rows = rowsSql.concat(extra);
+      }
+    } catch (e) { /* 补不到就按 SQL 结果走 */ }
 
     const blocks = [];
     {
@@ -3121,18 +3176,38 @@ module.exports = class ZoteroCite extends Plugin {
     return { headingIndex: -1, entries: [], marked: false, children };
   }
 
-  /** 给刚追加的条目块打上 BIB_ATTR 标记（追加的块都在文档末尾，取末 count 个即可） */
-  async markBibEntries(docId, count) {
+  /**
+   * 给刚写入的条目块打上 BIB_ATTR 标记。
+   *
+   * anchor 决定「哪几块是刚写的」：
+   *   · 原位插入时条目不在文档末尾，不能再取末 count 个（那会把用户写在表后的
+   *     附录、致谢标成文献条目，下次重排就被当旧表删掉）；
+   *   · 有 beforeId → 取它后面 count 个；只有 afterId → 取它前面 count 个；
+   *     都没有（追加到末尾）→ 取末 count 个。
+   */
+  async markBibEntries(docId, count, anchor) {
     if (!(count > 0)) {
       return;
     }
     try {
       const kids = ((await fetchSyncPost("/api/block/getChildBlocks", { id: docId })) || {}).data || [];
-      const tail = kids.slice(-count).filter((c) => c && "h" !== c.type);
+      let picked;
+      const beforeId = anchor && anchor.beforeId;
+      const afterId = anchor && anchor.afterId;
+      if (beforeId) {
+        const p = kids.findIndex((c) => c.id === beforeId);
+        picked = p >= 0 ? kids.slice(p + 1, p + 1 + count) : [];
+      } else if (afterId) {
+        const p = kids.findIndex((c) => c.id === afterId);
+        picked = p >= count ? kids.slice(p - count, p) : [];
+      } else {
+        picked = kids.slice(-count);
+      }
+      const tail = picked.filter((c) => c && "h" !== c.type);
       if (!tail.length) {
         return;
       }
-      await fetchSyncPost("/api/attr/batchSetBlockAttrs", {
+      await apiQuiet("/api/attr/batchSetBlockAttrs", {
         blockAttrs: tail.map((c) => ({ id: c.id, attrs: { [BIB_ATTR]: "1" } })),
       });
     } catch (e) { /* 标记失败只影响下次定位精度，不影响这次结果 */ }
@@ -3176,6 +3251,15 @@ module.exports = class ZoteroCite extends Plugin {
     list.forEach((k) => {
       const raw = (rendered.bibByKey && rendered.bibByKey[k]) || "";
       let text = cslHtmlToMarkdown(raw);
+      /*
+       * 取不到条目正文（Zotero 里已删、这台机又没同步到）且文档里也没存快照时，
+       * 绝不要只写一条「↗」—— 用户看到的是一个没有内容的空行，还以为文档坏了。
+       * 明写一句占位，至少知道是哪条、怎么处理。
+       */
+      if (!text.trim()) {
+        entries.push("（文献已不在 Zotero 库中：" + k + "）");
+        return;
+      }
       if (keepCsl) {
         /*
          * ⚠️ 保留 CSL 编号时必须防一件事：`1. ` 开头的段落会被 markdown 解析成
@@ -3267,23 +3351,24 @@ module.exports = class ZoteroCite extends Plugin {
       if (idx >= 0 && children[idx]) {
         const curHead = String(children[idx].content || "").trim();
         if (curHead !== heading) {
-          await fetchSyncPost("/api/block/updateBlock", {
+          // 尽力而为：改标题失败不该弹红条打扰用户，交给下次重排
+          await apiQuiet("/api/block/updateBlock", {
             id: children[idx].id,
             dataType: "markdown",
             data: `## ${heading}`,
-          }).catch(() => null);
+          });
         }
       } else if (prevHeading !== heading && oldEntries.length) {
-        await fetchSyncPost("/api/block/insertBlock", {
+        await apiQuiet("/api/block/insertBlock", {
           dataType: "markdown",
           data: `## ${heading}`,
           parentID: docId,
           nextID: oldEntries[0].id,
-        }).catch(() => null);
+        });
       }
     } else if (idx >= 0 && children[idx] &&
                LEGACY_BIB_HEADINGS.indexOf(String(children[idx].content || "").trim()) >= 0) {
-      await fetchSyncPost("/api/block/deleteBlock", { id: children[idx].id }).catch(() => null);
+      await apiQuiet("/api/block/deleteBlock", { id: children[idx].id });
     }
 
     /* 指纹相同 = 内容没变，条目一个字都不写（幂等刷新到此为止） */
@@ -3306,6 +3391,33 @@ module.exports = class ZoteroCite extends Plugin {
     }
 
     /*
+     * 插入锚点：新条目要放回「旧条目原来待的位置」，而不是一律追加到文档末尾。
+     * ⚠️ 从前是一律 appendBlock。用户在文献表后面写了附录/致谢之后，删掉旧条目时
+     *    标题块还留在原处，新条目被追加到最后 —— 附录就被夹进「参考文献」标题与
+     *    条目之间，读起来像是文献条目的一部分（2026-11-04 复现）。
+     *    用「旧条目前一块 / 后一块」两个邻居当锚点，删完立刻原位插回去。
+     */
+    let beforeId = "";
+    let afterId = "";
+    try {
+      const kids = ((await fetchSyncPost("/api/block/getChildBlocks", { id: docId })) || {}).data || [];
+      const firstIdx = oldEntries.length
+        ? kids.findIndex((c) => c.id === oldEntries[0].id) : -1;
+      const lastIdx = oldEntries.length
+        ? kids.findIndex((c) => c.id === oldEntries[oldEntries.length - 1].id) : -1;
+      if (firstIdx > 0) {
+        beforeId = kids[firstIdx - 1].id;
+      }
+      if (lastIdx >= 0 && kids[lastIdx + 1]) {
+        afterId = kids[lastIdx + 1].id;
+      }
+      // 有条目但一块都找不到（key 变了之类）：至少把新条目放到标题后面
+      if (firstIdx < 0 && idx >= 0 && children[idx]) {
+        beforeId = children[idx].id;
+      }
+    } catch (e) { /* 算不出锚点就退回追加到末尾 */ }
+
+    /*
      * 真的变了：删旧的 + 一次批量插入。
      * ⚠️ 删除必须走事务：逐块 deleteBlock 300 次实测 14.7 秒（并发也没用，内核内部仍然串行）。
      *    改用 /api/transactions 一次提交 100 个 delete，实测 10 块 49ms。
@@ -3313,6 +3425,7 @@ module.exports = class ZoteroCite extends Plugin {
      */
     if (oldEntries.length) {
       const batch = 100;
+      const applied = new Set();
       for (let i = 0; i < oldEntries.length; i += batch) {
         const ops = oldEntries.slice(i, i + batch).map((c) => ({ action: "delete", id: c.id }));
         let okTx = false;
@@ -3321,36 +3434,64 @@ module.exports = class ZoteroCite extends Plugin {
             transactions: [{ doOperations: ops }],
             reqId: Date.now() + i,
           });
-          okTx = !!(r && r.code === 0);
+          if (r && r.code === 0) {
+            okTx = true;
+            // 事务会回传「真正落实了哪些操作」，据此判断还有哪些块没删掉
+            const tx = (r.data && r.data[0]) || {};
+            ((tx.doOperations) || []).forEach((op) => {
+              if (op && op.action === "delete" && op.id) {
+                applied.add(op.id);
+              }
+            });
+          }
         } catch (e) {
           okTx = false;
         }
         if (!okTx) {
           for (const op of ops) {
-            await fetchSyncPost("/api/block/deleteBlock", { id: op.id }).catch(() => null);
+            const d = await apiQuiet("/api/block/deleteBlock", { id: op.id });
+            if (d && d.code === 0) {
+              applied.add(op.id);
+            }
           }
         }
       }
-      // 事务偶尔会留下最后一块（文档不允许整块清空），补一遍。
       /*
-       * ⚠️ 补删只能针对「本批次要删的那些 id」，绝不能重新定位后再删一遍：
-       *    oldEntries 删光之后 locateBib 找不到标记，会退回标题文字兜底，
-       *    而兜底把「标题之后的所有块」都算成文献条目 —— 用户在文献表后面写的
-       *    致谢、附录，或者刚插进去的新引用，会被一起删掉（2026-11-04 实测复现，
-       *    整段内容丢失且无任何提示）。残留块本来就属于本批次，按 id 重删即可。
+       * 补删：只补「请求了、但事务明确没落实」的那些块（文档不允许整块清空时，
+       * 事务会跳过最后一个 delete，这一块就会留在文末）。
+       *
+       * ⚠️ 两个必须：
+       *  1) 绝不能无条件对 oldEntries 再删一遍 —— 已经删掉的块再删一次，
+       *     内核返回 tree not found，fetchSyncPost 会把它弹成一条红条，
+       *     用户重排一次就看见「tree not found v3.8.9」（2026-11-04 实锤）。
+       *  2) 也绝不能重新 locateBib 定位后再删：oldEntries 删光后标记没了，
+       *     定位会退回标题文字兜底，把「标题之后的所有块」都当文献条目，
+       *     用户写在文献表后面的致谢、附录、刚插的引用会被一并删掉
+       *     （2026-11-04 实测复现，整段内容丢失且无任何提示）。
        */
-      try {
-        for (const c of oldEntries) {
-          await fetchSyncPost("/api/block/deleteBlock", { id: c.id }).catch(() => null);
-        }
-      } catch (e) { /* 补删失败不影响主流程 */ }
+      const left = oldEntries.filter((c) => !applied.has(c.id));
+      for (const c of left) {
+        await apiQuiet("/api/block/deleteBlock", { id: c.id });
+      }
     }
-    await fetchSyncPost("/api/block/appendBlock", {
-      parentID: docId,
-      dataType: "markdown",
-      data: finalEntries.join("\n\n"),
-    });
-    await this.markBibEntries(docId, finalEntries.length);
+    const bibMd = finalEntries.join("\n\n");
+    if (beforeId || afterId) {
+      const payload = { dataType: "markdown", data: bibMd };
+      if (beforeId) {
+        payload.previousID = beforeId;
+      }
+      if (afterId) {
+        payload.nextID = afterId;
+      }
+      await fetchSyncPost("/api/block/insertBlock", payload);
+    } else {
+      await fetchSyncPost("/api/block/appendBlock", {
+        parentID: docId,
+        dataType: "markdown",
+        data: bibMd,
+      });
+    }
+    await this.markBibEntries(docId, finalEntries.length, { beforeId, afterId });
     try {
       await fetchSyncPost("/api/attr/setBlockAttrs", {
         id: docId,
