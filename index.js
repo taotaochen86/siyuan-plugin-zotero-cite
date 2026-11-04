@@ -388,6 +388,26 @@ const idByKey = {};
 items.forEach(function (i) { idByKey[i.key] = i.id; });
 
 /*
+ * 快照底料：把每条条目转成「精简 CSL 对象」，随渲染结果一起回传，插件侧压进文档属性。
+ * 用 csl.retrieveItem（citeproc 真实的取数口径）而不是 item.toJSON：字段名与 CSL 一致，
+ * 以后要拿它重建 Zotero 条目时不用再做一遍映射；体积也只有 toJSON 的约三分之一。
+ */
+const snapCsl = {};
+const keepFields = P.cslKeep || [];
+items.forEach(function (i) {
+  try {
+    const o = csl.retrieveItem(i.id);
+    if (!o) { return; }
+    const slim = {id: i.id, type: o.type};
+    keepFields.forEach(function (f) {
+      const v = o[f];
+      if (v !== undefined && v !== null && v !== "") { slim[f] = v; }
+    });
+    snapCsl[i.key] = slim;
+  } catch (e) { /* 取不到就不进快照，绝不影响本次渲染 */ }
+});
+
+/*
  * 按「正文出现顺序」逐个 cluster 渲染。
  * 两条理由：
  *  1) 多条目必须一次交给 CSL，它才会自己排序、去重、压缩成 (A, 2019; B, 2020) / [1], [2]
@@ -457,6 +477,7 @@ return JSON.stringify({
   bibByKey: bibByKey,
   bibOrder: bibOrder,
   bibRaw: entries,
+  snapCsl: snapCsl,
   order: items.map(function (i) { return i.key; }),
   meta: items.map(function (i) {
     return {
@@ -1027,6 +1048,113 @@ function makeCiteLink(text, keys, settings, fmtId) {
   //    以后改设置里的「默认形态」不会悄悄改掉已经写好的引用。
   qs.push("f=" + normFmt(fmtId));
   return "[" + label + "](zotero://select/library/items/" + list[0] + "?" + qs.join("&") + ")";
+}
+
+/* ============================ 引用快照 ============================ */
+/*
+ * 为什么要把文献数据存进文档属性：
+ *   Zotero 里删掉一条文献、或换到没同步全的电脑，渲染时就取不到这条。此时旧版会留下
+ *   三处无声的痕迹：① 正文那处保留旧文字（看起来像正常引用，其实点开是空）；
+ *   ② 合并引用（A+B）里缺失的那条静默消失，但 ?zkeys= 还挂着旧 key；
+ *   ③ 文末末尾多一条只有 ↗ 的空条目。
+ *   把「每条文献的精简 CSL 数据 + 上次渲染出的正文/文末文本」压进文档块属性后，
+ *   下次重排即使 Zotero 里已经没有了，也能把上次的原文放回去，并明确告知。
+ *
+ * 体积（实测）：单条 CSL（剔除摘要、笔记）约 0.4 KB，gzip+base64 后约 0.3 KB，
+ *   100 条约 30 KB。块属性实测写到 293 KB 仍只需 0.03 秒，读回逐字节一致。
+ * 属性名 custom-zotero-bibsnap；值一律以 "z1:"（gzip）或 "j0:"（无 zlib 时）打头，
+ *   后面全是 base64 —— 不含引号、花括号、下划线，绕开块属性的实体转义与
+ *   _esc_newline_ 变换行那套语义改写。
+ */
+const SNAP_ATTR = "custom-zotero-bibsnap";
+const SNAP_VER = 1;
+/* 只留「重建条目」需要的字段：摘要、笔记、关键词一律不存（摘要一条就能占 700+ 字节） */
+const SNAP_CSL_KEEP = [
+  "type", "title", "author", "editor", "translator", "issued", "container-title",
+  "collection-title", "volume", "issue", "page", "publisher", "publisher-place",
+  "edition", "DOI", "URL", "ISBN", "ISSN", "language", "number", "number-of-pages",
+  "genre", "event-title", "chapter-number", "archive", "archive_location",
+];
+
+function snapToB64(str) {
+  try {
+    if (typeof Buffer !== "undefined") {
+      return Buffer.from(str, "utf8").toString("base64");
+    }
+    return btoa(unescape(encodeURIComponent(str)));
+  } catch (e) {
+    return "";
+  }
+}
+
+function snapFromB64(b64) {
+  try {
+    if (typeof Buffer !== "undefined") {
+      return Buffer.from(b64, "base64").toString("utf8");
+    }
+    return decodeURIComponent(escape(atob(b64)));
+  } catch (e) {
+    return "";
+  }
+}
+
+/** 对象 → 属性值。gzip 优先，没有 zlib（手机端/受限环境）就退纯 base64。 */
+function snapPack(obj) {
+  const json = JSON.stringify(obj);
+  try {
+    const zlib = require("zlib");
+    return "z1:" + zlib.gzipSync(Buffer.from(json, "utf8")).toString("base64");
+  } catch (e) {
+    return "j0:" + snapToB64(json);
+  }
+}
+
+function snapUnpack(raw) {
+  if (!raw || typeof raw !== "string") {
+    return null;
+  }
+  try {
+    if (raw.startsWith("z1:")) {
+      const zlib = require("zlib");
+      return JSON.parse(zlib.gunzipSync(Buffer.from(raw.slice(3), "base64")).toString("utf8"));
+    }
+    if (raw.startsWith("j0:")) {
+      return JSON.parse(snapFromB64(raw.slice(3)));
+    }
+    return JSON.parse(raw); // 兼容手工写进去的纯 JSON
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 读文档里的快照；没有或解不开都返回 null（不让快照坏了阻断重排） */
+async function readSnapshot(docId, attrs) {
+  try {
+    let a = attrs;
+    if (!a) {
+      const r = await fetchSyncPost("/api/attr/getBlockAttrs", { id: docId });
+      a = (r && r.data) || {};
+    }
+    const o = snapUnpack(a[SNAP_ATTR]);
+    if (!o || !o.items) {
+      return null;
+    }
+    return o;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function writeSnapshot(docId, snap) {
+  try {
+    await fetchSyncPost("/api/attr/setBlockAttrs", {
+      id: docId,
+      attrs: { [SNAP_ATTR]: snapPack(snap) },
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /** 按 key 批量取条目元数据（编辑引用对话框用） */
@@ -2701,7 +2829,53 @@ module.exports = class ZoteroCite extends Plugin {
       keys: scan.keys,
       clusters,
       styleId: this.settings.styleId,
+      cslKeep: SNAP_CSL_KEEP,
     }));
+    /*
+     * 有文献在当前 Zotero 里取不到（被删了、或这台机没同步全）时，用文档里的旧快照兜底：
+     *   · 文末条目 → 恢复上次渲染出的条目原文，不再出现只有 ↗ 的空行；
+     *   · 正文合并引用 → 恢复上次那一处的完整文本，不再静默少一条。
+     * 快照是「上次成功重排」留下的，数据永远来自本机曾经真实存在过的条目。
+     */
+    const prevSnap = await readSnapshot(docId);
+    const renderedKeys = new Set(rendered.order || []);
+    const missingKeys = scan.keys.filter((k) => !renderedKeys.has(k));
+    let snapBib = 0;
+    let snapCite = 0;
+    if (missingKeys.length && prevSnap) {
+      rendered.bibByKey = rendered.bibByKey || {};
+      rendered.cites = rendered.cites || {};
+      missingKeys.forEach((k) => {
+        const rec = prevSnap.items && prevSnap.items[k];
+        if (rec && rec.bib && !rendered.bibByKey[k]) {
+          rendered.bibByKey[k] = rec.bib; // 与 CSL 输出同为 html，下游 cslHtmlToMarkdown 照常处理
+          snapBib++;
+        }
+      });
+      const missSet = new Set(missingKeys);
+      Object.keys(prevSnap.clusters || {}).forEach((ck) => {
+        if (!ck.split("|").some((k) => missSet.has(k))) {
+          return;
+        }
+        const rec = prevSnap.clusters[ck];
+        if (!rec || !rec.c) {
+          return;
+        }
+        /*
+         * ⚠️ 这里不能写 `if (rendered.cites[ck]) return;`。
+         *    「A + 已删除的 B」这种合并引用，CSL 会把 B 过滤掉、只渲染出 A，
+         *    于是 cites[ck] 照样有值 —— 如果因此跳过覆盖，B 就静默消失了（痕迹二本身）。
+         *    快照里的 ck 键是「组合没变时」的完整文本，正是这种情况该用的。
+         *    只有一种情形不覆盖：这处的 key 组合真的变了（用户新插了一条），
+         *    此时 ck 不相等，压根进不到这个分支。
+         */
+        if (rendered.cites[ck] && rendered.cites[ck].c === rec.c) {
+          return; // 内容完全一致，不算用上快照
+        }
+        rendered.cites[ck] = rec;
+        snapCite++;
+      });
+    }
     const narrable = rendered.narrativeSupported !== false;
     // 记住这次用的样式形态，右键菜单要据此决定「叙述式」能不能点
     this._lastRendered = {
@@ -2796,7 +2970,54 @@ module.exports = class ZoteroCite extends Plugin {
     // 4. 重建文末参考文献表（顺序与编号全部交给样式自己决定）
     await this.rebuildBibliography(docId, scan.keys, rendered);
 
-    // 5. 记录 keys 到文档属性（冗余备份，方便别的工具读）
+    /*
+     * 5. 落文档属性：引用 key 清单 + 样式 + 快照。
+     * 快照只放「这次真在 Zotero 里取到的条目」；本次取不到的继续沿用旧快照里的那份，
+     * 否则一次缺条重排就会把它自己的存档抹成空的 —— 那才是真正丢数据。
+     */
+    const snapItems = {};
+    if (prevSnap && prevSnap.items) {
+      missingKeys.forEach((k) => {
+        if (prevSnap.items[k]) {
+          snapItems[k] = prevSnap.items[k];
+        }
+      });
+    }
+    Object.keys(rendered.snapCsl || {}).forEach((k) => {
+      const bib = (rendered.bibByKey && rendered.bibByKey[k]) || "";
+      if (!bib) {
+        return;
+      }
+      snapItems[k] = { csl: rendered.snapCsl[k], bib: bib };
+    });
+    const snapClusters = {};
+    const missSetForWrite = new Set(missingKeys);
+    Object.keys(rendered.cites || {}).forEach((ck) => {
+      const rec = rendered.cites[ck];
+      if (!rec || !rec.c) {
+        return;
+      }
+      /*
+       * ⚠️ 绝不能拿「含缺失条目的残缺文本」覆盖旧快照。
+       *    这一处只要还有条目在 Zotero 里取不到，CSL 渲染出的就只是剩下的那条，
+       *    拿它写回快照 = 亲手把完整存档降级成残缺版，下次再也补不回来。
+       *    （第一版就栽在这里：兜底逻辑明明对，但存档被上一轮写坏了，看着像没生效。）
+       */
+      const hasMissing = ck.split("|").some((k) => missSetForWrite.has(k));
+      const prev = prevSnap && prevSnap.clusters && prevSnap.clusters[ck];
+      if (hasMissing && prev && prev.c && prev.c !== rec.c) {
+        snapClusters[ck] = prev;
+        return;
+      }
+      snapClusters[ck] = { c: rec.c, np: rec.np || [] };
+    });
+    const snap = {
+      v: SNAP_VER,
+      at: new Date().toISOString(),
+      style: this.settings.styleId,
+      items: snapItems,
+      clusters: snapClusters,
+    };
     try {
       const fmtCount = {};
       scan.hits.forEach(h => { fmtCount[h.fmt] = (fmtCount[h.fmt] || 0) + 1; });
@@ -2806,6 +3027,7 @@ module.exports = class ZoteroCite extends Plugin {
           "custom-zotero-cites": scan.keys.join(","),
           "custom-zotero-style": this.settings.styleId,
           "custom-zotero-formats": JSON.stringify(fmtCount),
+          [SNAP_ATTR]: snapPack(snap),
         },
       });
     } catch (e) { /* 属性写失败不影响主流程 */ }
@@ -2813,11 +3035,23 @@ module.exports = class ZoteroCite extends Plugin {
     const styleName = (rendered.style && rendered.style.title) || this.settings.styleId.split("/").pop();
     this._lastStyleId = this.settings.styleId;
     this._styleBeforeChange = null;
-    if (verbose) {
-      const tail = skipped ? `，${skipped} 块因内容刚被改动跳过（再执行一次即可）` : "";
-      showMessage(`已重排 ${updated} 处引用、${scan.keys.length} 条参考文献（${styleName}）${tail}`, skipped ? 7000 : 4000);
+    /*
+     * 有文献取不到时，无论是不是手动触发都要说一声 —— 这是用户唯一能察觉的时机。
+     * 说明「用的哪份数据」：快照里存的是上次成功重排时的原文，不是 Zotero 现况。
+     */
+    let warn = "";
+    if (missingKeys.length) {
+      const listed = missingKeys.slice(0, 3).join("、") + (missingKeys.length > 3 ? "…" : "");
+      const saved = snapBib || snapCite;
+      warn = `；Zotero 里找不到 ${missingKeys.length} 条文献（${listed}）` +
+        (saved ? "，已用文档里保存的引用快照补全原文" : "，文档里还没有它们的快照，这几处保持原样");
     }
-    return { updated, keys: scan.keys.length };
+    if (verbose || missingKeys.length) {
+      const tail = skipped ? `，${skipped} 块因内容刚被改动跳过（再执行一次即可）` : "";
+      showMessage(`已重排 ${updated} 处引用、${scan.keys.length} 条参考文献（${styleName}）${tail}${warn}`,
+        missingKeys.length ? 9000 : (skipped ? 7000 : 4000));
+    }
+    return { updated, keys: scan.keys.length, missing: missingKeys.length };
   }
 
   /**
@@ -2869,7 +3103,20 @@ module.exports = class ZoteroCite extends Plugin {
       }
     });
     if (hAt >= 0) {
-      return { headingIndex: hAt, entries: children.slice(hAt + 1), marked: false, children };
+      /*
+       * 兜底只在老文档（1.2.29 及以前，条目还没打标记）走一次。
+       * 收集到「下一个标题块」为止：文献表后面常跟着「致谢」「附录」这类带标题
+       * 的段落，它们绝不能被当成条目删掉。无标题的普通段落这一路仍可能误判，
+       * 但接管过一次之后条目就有标记，不会再走到这里。
+       */
+      const tail = [];
+      for (let i = hAt + 1; i < children.length; i++) {
+        if (children[i] && "h" === children[i].type) {
+          break;
+        }
+        tail.push(children[i]);
+      }
+      return { headingIndex: hAt, entries: tail, marked: false, children };
     }
     return { headingIndex: -1, entries: [], marked: false, children };
   }
@@ -3085,10 +3332,15 @@ module.exports = class ZoteroCite extends Plugin {
         }
       }
       // 事务偶尔会留下最后一块（文档不允许整块清空），补一遍。
-      // 重新定位一次而不是按标题文字找：标题可能被关掉、也可能本来就没有。
+      /*
+       * ⚠️ 补删只能针对「本批次要删的那些 id」，绝不能重新定位后再删一遍：
+       *    oldEntries 删光之后 locateBib 找不到标记，会退回标题文字兜底，
+       *    而兜底把「标题之后的所有块」都算成文献条目 —— 用户在文献表后面写的
+       *    致谢、附录，或者刚插进去的新引用，会被一起删掉（2026-11-04 实测复现，
+       *    整段内容丢失且无任何提示）。残留块本来就属于本批次，按 id 重删即可。
+       */
       try {
-        const after = await this.locateBib(docId, heading);
-        for (const c of after.entries) {
+        for (const c of oldEntries) {
           await fetchSyncPost("/api/block/deleteBlock", { id: c.id }).catch(() => null);
         }
       } catch (e) { /* 补删失败不影响主流程 */ }
