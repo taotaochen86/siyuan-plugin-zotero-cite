@@ -1,4 +1,4 @@
-# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.30
+# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.31
 
 **简体中文** | [English](./README_en.md)
 
@@ -66,7 +66,7 @@
 
 ### 5.2 首次配置
 
-图文步骤见 <http://ttchen.w1.luyouxia.net/20260915211141-favpvyz-site/20260915211232-qh8ikcb.html>。
+图文步骤见 <https://ttchen.cn42.ug.link/web/20260915211141-favpvyz-site/20260915211232-qh8ikcb.html>。
 
 1. 下载 Debug Bridge **1.2** 的 xpi（别用更旧的包）
 2. Zotero → 工具 → 插件，把 xpi 直接拖进窗口
@@ -224,6 +224,7 @@ MIT License © 2026 ttChen
 
 | 版本 | 日期 | 主要变化 |
 |---|---|---|
+| 1.2.31 | 2026-11-04 | 安装说明换新域名（`ttchen.cn42.ug.link`，旧 luyouxia 隧道不稳定）；引用右键菜单加「插件设置…」，一处点开就能改令牌与样式 |
 | 1.2.30 | 2026-11-04 | 文末标题改为「自动」：按 CSL 样式语言出「参考文献」或 References，也可选不生成、或自定义；文末条目改用块属性 `custom-zotero-bib` 定位，改标题/删标题不再重复追加 |
 | 1.2.29 | 2026-11-04 | 封面重做以通过集市校验：去掉网格、简化背景、画布 1376×800，`preview.png` 从 935KB 压到 485KB（上限 512KB）；preflight 增加封面体积检查 |
 | 1.2.28 | 2026-11-03 | 集市封面换成真实文档截图（正文引用 + 文末文献表），卡片加内边距与底部渐隐 |

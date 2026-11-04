@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-zotero-cite",
   "author": "ttChen",
   "url": "https://github.com/taotaochen86/siyuan-plugin-zotero-cite",
-  "version": "1.2.30",
+  "version": "1.2.31",
   "minAppVersion": "3.1.0",
   "disabledInPublish": true,
   "backends": [

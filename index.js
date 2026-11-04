@@ -59,7 +59,7 @@ const DEFAULT_SETTINGS = {
  * 光看报错根本猜不到要装扩展，所以所有失败提示都必须把这份说明指出来。
  */
 const DEP_NAME = "Zotero Debug Bridge";
-const DEP_URL = "http://ttchen.w1.luyouxia.net/20260915211141-favpvyz-site/20260915211232-qh8ikcb.html";
+const DEP_URL = "https://ttchen.cn42.ug.link/web/20260915211141-favpvyz-site/20260915211232-qh8ikcb.html";
 
 /**
  * 顶栏图标（32 栅格，画在 2 单位整数栅格上 —— 思源顶栏只显示 16px，
@@ -1913,6 +1913,8 @@ module.exports = class ZoteroCite extends Plugin {
       `<div class="zc-menu__sep"></div>` +
       `<div class="zc-menu__item" data-act="edit"><span class="zc-menu__tick">✎</span><span>编辑文献引用…（可增可删）</span></div>` +
       `<div class="zc-menu__item" data-act="style"><span class="zc-menu__tick">≡</span><span>切换全局默认 CSL 样式…</span></div>` +
+      `<div class="zc-menu__item" data-act="setting"><span class="zc-menu__tick">⚙</span><span>插件设置…` +
+        `<span class="zc-menu__sub">令牌 / 样式 / 文末标题 / 编号</span></span></div>` +
       `<div class="zc-menu__sep"></div>` +
       `<div class="zc-menu__item" data-act="locate"><span class="zc-menu__tick">↓</span><span>定位到文末参考文献中的这条</span></div>` +
       `<div class="zc-menu__sep"></div>` +
@@ -1951,6 +1953,13 @@ module.exports = class ZoteroCite extends Plugin {
           await this.openCiteEditDialog(anchor, keys);
         } else if (act === "style") {
           await this.openStylePicker(anchor);
+        } else if (act === "setting") {
+          // 直接弹插件设置面板（思源 Plugin 自带 openSetting）
+          if (typeof this.openSetting === "function") {
+            await this.openSetting();
+          } else {
+            showMessage("当前思源版本不支持直接打开插件设置，请到 设置 → 集市 → 已下载 → 插件 → 设置 里打开。", 8000);
+          }
         } else if (act === "locate") {
           const n = this.locateInBibliography(anchor, keys);
           if (!n) {

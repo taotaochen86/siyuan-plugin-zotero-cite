@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.30
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.31
 
 **English** | [简体中文](./README.md)
 
@@ -221,6 +221,7 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.31 | 2026-11-04 | Setup guide moved to a new domain (`ttchen.cn42.ug.link`, the old luyouxia tunnel was unstable); added a "Plugin settings…" item to the citation context menu |
 | 1.2.30 | 2026-11-04 | Bibliography heading is now "Auto" (参考文献 / References from the CSL style language, or none at all, or custom); entries are located by the `custom-zotero-bib` block attribute, so renaming or deleting the heading no longer duplicates the list |
 | 1.2.29 | 2026-11-04 | Cover rebuilt to pass the bazaar check: grid removed, background simplified, canvas 1376×800, `preview.png` down from 935KB to 485KB (limit 512KB); preflight now checks cover size |
 | 1.2.28 | 2026-11-03 | Marketplace cover now uses a real document screenshot (in-text citations + bibliography), with card padding and bottom fade |
