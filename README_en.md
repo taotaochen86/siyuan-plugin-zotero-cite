@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.32
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.33
 
 **English** | [简体中文](./README.md)
 
@@ -10,20 +10,22 @@ Insert Zotero citations into SiYuan — both the in-text citation and the biblio
 
 ## 2 What it does
 
-<img src="assets/example-doc.png" alt="In-text citation and the generated bibliography" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/example-doc.png'">
+<img src="assets/example-doc.png" alt="In-text citations and the generated References list" onerror="this.src='/plugins/siyuan-plugin-zotero-cite/assets/example-doc.png'">
 
-Both the in-text citation and the bibliography at the bottom are rendered directly by the CSL style installed in Zotero. Switch styles once and both sides are re-paginated — no manual editing.
+Both the in-text citations — merged as `(Dela Cruz et al., 2026; Ge et al., 2026)`, narrative as `Ye et al. (2026)` — and the References list at the bottom are rendered directly by the CSL style active in Zotero. Switch styles once and both sides are re-rendered with no manual editing; the ↗ next to each entry jumps back to Zotero.
 
 | Feature | Detail |
 |---|---|
 | 2.1 One-click insert | Select items in Zotero (multi-select allowed), click once in SiYuan, both the text and the bibliography update. No dialog |
 | 2.2 Text follows CSL exactly | How the citation reads, how multiple items are joined, whether `[n]` appears — all decided by the active Zotero style (APA, Nature, IEEE, GB/T 7714, ACS, journal-specific styles) |
 | 2.3 Two forms, mixable per citation | Default form (parent item / author-date / numeric) plus narrative `Chen et al. (2021)`; you can mix them in one document and even stack them as `Chen et al. (2021) [1]` |
-| 2.4 Edit existing citations | Switch form, add or remove references of that citation, change the document-wide CSL style, jump to the matching bibliography entry |
-| 2.5 Bibliography maintained automatically | Order follows the style (alphabetical for author-date, citation order for numeric); entry numbering follows the CSL style by default, and can be turned off or replaced with a custom template; re-rendered when the style changes |
+| 2.4 Edit existing citations | Switch form, add or remove references of that citation, change the document-wide CSL style, jump to the matching bibliography entry, refresh the document, or open the plugin settings right from the menu |
+| 2.5 Bibliography maintained automatically | Order follows the style (alphabetical for author-date, citation order for numeric); entry numbering follows the CSL style by default, and can be turned off or replaced with a custom template; re-rendered when the style changes; rebuilt in place, so an appendix written after the list never gets swallowed into the bibliography |
 | 2.6 Click to jump back to Zotero | Clicking a citation selects that item in Zotero; multi-item citations select all of them |
 | 2.7 Parent items only | Selecting a PDF or an annotation in Zotero resolves to its parent item; standalone notes and attachments never appear |
 | 2.8 Undo | 20 steps per document, style switches included |
+| 2.9 Citation snapshot fallback | The trimmed CSL data of every reference plus its last rendered text are stored in a document attribute (~0.3 KB each). When an item is gone from Zotero, or missing on this machine after a sync, re-rendering restores the previous text and tells you exactly which keys it could not find |
+| 2.10 Only the blocks that changed | Blocks whose content is unchanged are not written at all — the same holds for citations inside lists, tables and headings; ten consecutive runs leave both content and block attributes untouched |
 
 ## 3 Problems it solves in SiYuan
 
@@ -35,6 +37,7 @@ Both the in-text citation and the bibliography at the bottom are rendered direct
 | 3.4 In-text citations and bibliography entries have no link to each other, so removing a reference means fixing both ends | Both ends share the same itemKey; delete an in-text citation, re-render, and the bibliography entry disappears |
 | 3.5 Finding which paper a sentence came from means digging through Zotero | Click the citation to jump to Zotero with the item selected — all items for a multi-item citation |
 | 3.6 Journal and thesis templates differ wildly; hand-formatting is error-prone | Thousands of CSL styles are available instantly, and custom CSL files work too |
+| 3.7 A reference deleted from Zotero, or missing on this machine after a sync, silently changes the text | The text from the last successful render is kept in a document attribute and used as a fallback; the notification names every key that is no longer in Zotero (see 7.5) |
 
 ## 4 How it compares
 
@@ -79,7 +82,7 @@ Without the Debug Bridge nothing listens on that endpoint and every request fail
 5. SiYuan → Settings → Bazaar → Downloaded → Plugins → Zotero Cite → Settings, paste the same token into "Access token"
 6. Click "Test connection"; `Connected: Zotero 10.x, library ID 1` means you are done
 
-Repeating steps 1–5 is required on a new machine (the token lives in Zotero's `prefs.js` and does not sync with SiYuan).
+Repeating steps 1–5 is required on a new machine (the token lives in Zotero's `prefs.js` and does not sync with SiYuan). A custom `.csl` also has to be installed there, otherwise the settings panel shows a red warning and re-rendering is refused (see "Style status" in 5.3).
 
 ### 5.3 Settings
 
@@ -88,10 +91,13 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | Bridge URL | `http://127.0.0.1:23119/debug-bridge/execute` | Rarely needs changing |
 | Access token | empty | The token from step 4 in 5.2 |
 | Default citation form | Default (CSL) | Affects new citations only; existing ones follow their own `?f=` |
-| CSL style | current style | You can paste a style URL directly |
+| CSL style | current style | You can paste a style URL directly. A fresh install defaults to APA, which ships with every Zotero |
 | Pick from installed styles… | — | Opens the style picker; search and switch, whole document re-renders |
+| Style status | checked automatically | Opening the panel verifies that this style exists in Zotero on this machine: `✓ installed: …` in grey; `✗ this style is not installed, refresh and insert will be refused` in red, with a "use the built-in APA" button; if Zotero is unreachable it only says it cannot tell, and offers no button |
 | Bibliography heading | Auto | "Auto" picks 参考文献 or References from the CSL style's language; choose "no heading" to output entries only and write the heading yourself; or type any custom text |
 | Citations carry links | on | Turn off for plain text; click-to-Zotero and the right-click menu stop working |
+
+When the style is missing the plugin **does not** quietly substitute another one and overwrite the whole document: the refresh is refused, not a single byte of the body changes, and the message names the missing style. This typically happens when SiYuan settings sync to a machine that lacks that `.csl`.
 
 ## 6 Slash command and shortcuts
 
@@ -109,7 +115,8 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | 6.10 Right-click · Change document CSL style… | Right-click an in-text citation → item 4, opens the style picker | — |
 | 6.11 Right-click · Locate this entry in the bibliography | Right-click an in-text citation → item 5, scrolls to the entry and highlights it for 1.9 s | — |
 | 6.12 Right-click · Refresh Zotero citations in this document | Right-click an in-text citation → item 6, re-renders every citation and the bibliography with the current style | — |
-| 6.13 In-block right-click · Insert Zotero citation | Right-click inside any paragraph → "Insert Zotero citation", inserts the items currently selected in Zotero | — |
+| 6.13 Right-click · Plugin settings… | Right-click an in-text citation → item 7, opens this plugin's settings page directly (no need to dig through the bazaar) | — |
+| 6.14 In-block right-click · Insert Zotero citation | Right-click inside any paragraph → "Insert Zotero citation", inserts the items currently selected in Zotero | — |
 
 The right-click menu only works on **in-text citations**, and only affects the citation you clicked. The `[↗]` link on a bibliography entry does not open the menu — it is the jump-back-to-Zotero link. None of the menu items has a default shortcut; bind the matching commands in Settings → Keymap → Plugins if you want one.
 
@@ -127,7 +134,7 @@ The right-click menu only works on **in-text citations**, and only affects the c
 
 If nothing is selected in Zotero you get a one-line hint, never a dialog.
 
-### 7.2 Edit an existing citation (right-click, 6 items)
+### 7.2 Edit an existing citation (right-click, 7 items)
 
 Right-click an in-text citation and you get this menu:
 
@@ -139,7 +146,9 @@ Right-click an in-text citation and you get this menu:
 | `Chen et al. (2026)` narrative | Switches to narrative; this citation only; greyed out for numeric styles |
 | Edit references… (add or remove) | Lists every item of this citation — untick to remove; append the current Zotero selection or add by keyword search |
 | Change document CSL style… | Reads styles installed in Zotero, applies your pick, re-renders the whole document |
+| Plugin settings… | Opens this plugin's settings page: token, default form, style and bibliography heading all live there |
 | Locate this entry in the bibliography | Scrolls to the entry and highlights it for 1.9 s; all items get highlighted |
+| Refresh Zotero citations in this document | Re-renders every citation and the bibliography with the current style — the same as running "re-render the whole document" from the menu |
 
 "Edit references…" opens the window below. Unticking an item drops it from this citation; numbers are only assigned to the items you keep, and they renumber as you untick:
 
@@ -165,23 +174,55 @@ An in-text citation is just a markdown link:
 [(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)
 ```
 
-1. The link is the single source of truth; re-rendering collects order from the body
+1. The link is the only source of order on re-render: every `zotero://` link is collected from the body and numbered by appearance
 2. `?f=` is the form of that citation (`csl` / `narr`), stored per citation
 3. Multi-item: `items/KEY1?zkeys=KEY1,KEY2&f=csl`
 4. Bibliography entry links carry `?bib=1` and are skipped when re-rendering, so deleted references do not come back
+5. The visible text of each reference also has a document-level snapshot as a fallback — see the next section
+
+### 7.5 A reference was deleted from Zotero, or you moved to another machine
+
+Normally every string is fetched from Zotero and re-rendered each time. Once an item cannot be found on this machine (deleted, never synced here, or a different library), older builds left three traces with **no warning at all**:
+
+| Trace | Symptom |
+|---|---|
+| The in-text citation | Still shows the old text and looks fine, but it no longer resolves and is not numbered |
+| A merged citation (A + B) | Only A remains while `?zkeys=` still lists B — no error, nothing visible |
+| The bibliography | A trailing row containing nothing but `↗` |
+
+Every re-render now packs "trimmed CSL data of each reference + the text rendered last time" into the document attribute `custom-zotero-bibsnap`, and uses it whenever an item cannot be found:
+
+| Case | Current behaviour |
+|---|---|
+| Bibliography entry | Restored from the snapshot instead of becoming an empty row |
+| Merged in-text citation | Overwritten with the complete text stored for that cluster, so nothing silently drops out |
+| Notification | The message gains `; N references not found in Zotero (KEY1, KEY2…), restored from the citation snapshot saved in this document` |
+| A document that never rendered successfully | No snapshot exists; those spots are left untouched and the message says so |
+
+Measured behaviour and limits:
+
+1. ~0.3 KB per reference (abstract, notes and tags are dropped, only fields needed to rebuild an entry are kept); 100 references ≈ 30 KB, and it syncs with the document
+2. The snapshot is only updated by a **successful** render; a cluster that still contains an unfindable key never overwrites the old snapshot with the degraded text (otherwise one fallback would permanently downgrade the archive)
+3. The snapshot only protects rendering. It does **not** push items back into Zotero — real recovery still means re-importing from a backup or library
+4. Adding a reference to that citation changes the key combination, so it renders from the new combination and the old snapshot no longer applies there
+5. With numeric styles `[n]` is a document-wide sequence number; a restored entry carries last time's number and may not match the current order — check before submission
+6. To wipe it completely, delete the `custom-zotero-bibsnap` attribute; the next render creates a fresh one
 
 ## 8 Limitations
 
 1. **Hard dependency on Zotero + Debug Bridge** — without it the plugin does nothing; it is not self-contained
 2. **Zotero only** — EndNote, Mendeley, NoteExpress and direct PubMed lookup are not supported
 3. **Desktop only** — it needs the local port 23119, so the web and mobile clients cannot use it
-4. **Bibliography entries are owned by the plugin** — every entry carries a `custom-zotero-bib` block attribute and a re-render only replaces those marked blocks. Do not edit that attribute by hand, and do not expect entries moved elsewhere to still be recognised
+4. **Bibliography entries are owned by the plugin** — every entry carries a `custom-zotero-bib` block attribute and a re-render only replaces those marked blocks. Do not edit that attribute by hand, and do not expect entries moved elsewhere to still be recognised. Rebuilds are inserted back in place, between the previous and next entry, so an acknowledgement or appendix written after the list is not swallowed into it; if every old entry is gone and there is no neighbour to anchor to, the new list can only be appended at the end of the document
 5. **"Auto" heading is a guess** — the test is whether the CSL style title contains CJK characters, plus keywords in the style ID (GB/T 7714, CSTR, …). A homemade private style may be misjudged; set the heading text explicitly in settings
 6. **Undo is a separate stack** — `Ctrl+Z` only covers inserting; re-rendering and style switches need the plugin's own undo command
 7. **Narrative form is author-date only** — IEEE and GB/T numeric styles have no such concept
 8. **Bibliography numbering follows the CSL style by default** — numeric styles produce `[1]` / `1.` (a leading `1. ` is written in escaped form so markdown does not turn it into an ordered list); author-date styles have none. You can switch to "no numbering" or a custom template (`{n}` = sequence) in settings. Check your journal's requirement before submission
 9. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
 10. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**
+11. **The snapshot is a fallback, not a backup** — `custom-zotero-bibsnap` only keeps the fields needed for rendering, so it keeps old documents looking right but cannot push items back into Zotero, and it cannot restore abstracts, notes or PDFs. Real recovery still means re-importing
+12. **Snapshot numbering is last time's** — with numeric styles `[n]` is assigned by CSL in document order, so a restored entry carries the previous number and may not match the current sequence; documents that never rendered successfully have no snapshot at all
+13. **The snapshot syncs with the document** — about 0.3 KB per reference (100 references ≈ 30 KB). It lands in the `.sy` file and travels with SiYuan sync, so citation-heavy documents carry a larger attribute value
 
 ---
 
@@ -190,9 +231,11 @@ An in-text citation is just a markdown link:
 | Step | Approach |
 |---|---|
 | Talking to Zotero | Talks to `http://127.0.0.1:23119/debug-bridge/execute` directly, running a small piece of JS inside Zotero to fetch item metadata, installed CSL styles and the rendered citation string. No helper process, no proxy service |
-| What a citation is | An ordinary markdown link `[(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)`; the link itself is the single source of truth (see 7.4) |
+| What a citation is | An ordinary markdown link `[(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)`. The link is the source of order and the form marker on re-render (see 7.4), with a document-level snapshot as fallback (see 7.5) |
 | Citation text | Rendered by the CSL style installed in Zotero; in-text and bibliography strings come from the same source and are re-rendered together when the style changes |
-| Bibliography | Entries are recognised by a `custom-zotero-bib` block attribute (old documents fall back to matching the heading text) and only those marked blocks are replaced; the heading is auto-generated, customised, or omitted entirely per settings; entry links carry `?bib=1` and are skipped on re-render, so deleted references never come back |
+| Bibliography | Entries are recognised by a `custom-zotero-bib` block attribute (old documents fall back to matching the heading text) and only those marked blocks are replaced; new entries are inserted back in place between the previous and next one, and marked by anchor; the heading is auto-generated, customised, or omitted entirely per settings; entry links carry `?bib=1` and are skipped on re-render, so deleted references never come back |
+| Citation snapshot | 27 CSL fields per reference (abstract, notes and tags dropped) plus the last rendered in-text/bibliography text, serialised to JSON, gzipped and base64-encoded into `custom-zotero-bibsnap` (prefix `z1:`; plain base64 with `j0:` when zlib is unavailable). The value contains no quotes, braces or underscores, which sidesteps the entity escaping and `_esc_newline_` rewriting of block attributes |
+| Minimal writes | Each block's canonical content is computed first (code masked → block attributes stripped → zero-width characters removed); if it already matches and no attribute has leaked into the text, the block is skipped entirely. Best-effort writes fail quietly instead of turning a kernel error into a notification |
 | Undo | One stack per document, 20 steps, written back through the kernel `/api/transactions` API |
 | Runtime | SiYuan desktop renderer (Node available); the web and mobile clients have no port 23119 and cannot use it |
 | Code layout | A single `index.js`: plugin class + three dialogs + right-click menu + settings page; `index.css` only handles layout and takes every color from SiYuan CSS variables, so light and dark themes follow automatically |
@@ -221,6 +264,7 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.33 | 2026-11-04 | **Citation snapshot**: the trimmed CSL data and last rendered text of every reference are stored in the document attribute `custom-zotero-bibsnap`, so an item missing from Zotero is restored from the previous text and named in the notification (no more silent empty text / dropped reference in a merged citation / empty `↗` row). The bibliography is now rebuilt in place, so an appendix written after the list is no longer swallowed into it. Re-rendering no longer throws `tree not found` toasts; citations inside lists, tables and headings stop being rewritten on every run; a just-inserted citation no longer stays unrendered; command-palette failures are reported. Added a 30-case automated test suite (idempotency / snapshot / missing item / undo / concurrency / 100-reference scale) |
 | 1.2.32 | 2026-11-04 | Default style pinned to APA, which ships with every Zotero install, so first use can no longer fail on a missing style; a style missing on this machine now refuses to refresh (instead of silently swapping in another style) and the settings panel shows a red warning plus a one-click "use the built-in APA" button |
 | 1.2.31 | 2026-11-04 | Setup guide moved to a new domain (`ttchen.cn42.ug.link`, the old luyouxia tunnel was unstable); added a "Plugin settings…" item to the citation context menu |
 | 1.2.30 | 2026-11-04 | Bibliography heading is now "Auto" (参考文献 / References from the CSL style language, or none at all, or custom); entries are located by the `custom-zotero-bib` block attribute, so renaming or deleting the heading no longer duplicates the list |
