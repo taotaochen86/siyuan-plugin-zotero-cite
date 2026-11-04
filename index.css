@@ -239,6 +239,33 @@
   opacity: .3;
 }
 
+/*
+ * 条目在当前 Zotero 库里查不到（换了 profile / 数据目录后 item key 对不上）。
+ * 内容来自文档存档，不是坏数据 —— 所以只做「提示性」样式，不做灰掉或删除线，
+ * 免得用户以为这几条已经废了。
+ */
+.zc-dlg .zc-item--miss {
+  border-style: dashed;
+  border-color: var(--b3-border-color);
+}
+.zc-dlg .zc-item--miss .zc-sub {
+  opacity: .85;
+}
+.zc-dlg .zc-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: nowrap;
+  background: var(--b3-theme-surface-lighter);
+  color: var(--b3-theme-on-surface);
+}
+.zc-dlg .zc-note__warn {
+  color: var(--b3-theme-error);
+}
+
 /* 空状态 */
 .zc-dlg .zc-empty {
   padding: 26px 12px;

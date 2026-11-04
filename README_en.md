@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.33
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.34
 
 **English** | [简体中文](./README.md)
 
@@ -156,6 +156,7 @@ Right-click an in-text citation and you get this menu:
 
 - Single click = jump to Zotero (all items selected)
 - To delete a citation, delete the text, or untick everything in "Edit references"
+- When an item cannot be found in the current Zotero library (a different profile or data directory leaves the item keys dangling), the list no longer shows a screenful of "(item no longer in library)": title, authors and year come from the citation snapshot saved in the document and the row is tagged "not in current library · from document snapshot". "Relink in library" then matches by DOI (title as fallback) against the current library and repoints the entry when there is exactly one hit. See 7.5
 
 ### 7.3 Undo
 
@@ -180,7 +181,7 @@ An in-text citation is just a markdown link:
 4. Bibliography entry links carry `?bib=1` and are skipped when re-rendering, so deleted references do not come back
 5. The visible text of each reference also has a document-level snapshot as a fallback — see the next section
 
-### 7.5 A reference was deleted from Zotero, or you moved to another machine
+### 7.5 A reference was deleted from Zotero, or you moved to another machine or library
 
 Normally every string is fetched from Zotero and re-rendered each time. Once an item cannot be found on this machine (deleted, never synced here, or a different library), older builds left three traces with **no warning at all**:
 
@@ -208,6 +209,49 @@ Measured behaviour and limits:
 5. With numeric styles `[n]` is a document-wide sequence number; a restored entry carries last time's number and may not match the current order — check before submission
 6. To wipe it completely, delete the `custom-zotero-bibsnap` attribute; the next render creates a fresh one
 
+**Bibliography numbering is always uniform**
+
+A snapshot entry is a product of *the render that produced it*, so it may carry that render's number (`1. ` / `(1)` if the style back then was numeric). When that item cannot be found in the current library and the snapshot is used, you end up with "six unnumbered APA entries and one carrying `(1)`" (reported 2026-11-04). Every re-render now finishes with a normalisation pass:
+
+- The style's own intent is decided from **the entries that rendered live** — if none of them carries a prefix, the style is author-date and any stray prefix is stripped; if all do, the style is numeric and missing numbers are filled in as a continuous sequence
+- `splitBibHead` tells a number from a year, so year-leading styles such as `(2020). Title…` are not stripped by mistake
+- In the normal cases (all prefixed / none prefixed) nothing is touched, the fingerprint is unchanged and no extra write happens
+
+**Bibliography order does not break when entries are missing**
+
+Missing entries can only be restored from the snapshot. Appending them to the end of the list turns an author-date bibliography from alphabetical into "live ones first, missing ones last" — measured 2026-11-04: 6 of 7 entries were missing and the one originally 4th was pushed to the top. The rule now depends on the style type:
+
+| Style | How the order is decided |
+|---|---|
+| Author-date | The order *is* the author alphabet, which has one correct answer, so entries are sorted by their own text and missing ones drop back into place. A table broken by an earlier version heals on the next render |
+| Numeric | The order is the in-text citation order, which cannot be derived, so it is restored from `bibOrder` stored in the snapshot; without a snapshot it falls back to the scan order |
+
+Sorting compares code points, not pinyin: CSL puts CJK entries after the Latin ones, while pinyin order would push 许育新 ahead of `Ye`.
+
+**Web-page citations lose their italics, and stop drifting every render**
+
+Authorless, yearless web entries (university notices, dataset pages) are rendered by APA as `(*Title*, n.d.)`. That asterisk inside the `[…](zotero://…)` link text makes SiYuan split the link into three segments; the next scan reads one citation as three, and every re-render splits it again — it never converges. Emphasis markers (`*` / `<i>`) are now stripped from the body citation text: one italic less, in exchange for an intact link and a stable render. Bibliography entries are standalone paragraphs with no nested link, so their italics stay.
+
+**After switching the Zotero profile or data directory**
+
+A Zotero item key is unique only inside one library. Switch profiles, re-import the library from elsewhere, or move to another account, and the same paper gets a new key while the document still stores the old one — every citation in the document suddenly looks missing. The **document is fine**: `custom-zotero-bibsnap` still holds title, authors, year, DOI and the rendered bibliography text.
+
+| Action | Behaviour after switching libraries |
+|---|---|
+| Edit references… | Still lists each title / authors / year from the snapshot, tagged "not in current library · from document snapshot", with an "N items not in the current library" count in the header instead of a wall of "(item no longer in library)" |
+| "Relink in library" | Compares the snapshot DOI against the current library (title as fallback) and accepts only a unique hit, repointing that entry to the new key; when nothing matches it says so plainly |
+| Bibliography | Entry text comes from the snapshot, the order is rebuilt per style type (see the previous section), and the numbering form is normalised — no "some numbered, some not" |
+| Default form / narrative | Still switches both ways, using the text rendered last time; narrative stays greyed out for numeric styles |
+| Save after editing / Refresh | Both run normally, filling the body and bibliography from the snapshot and reporting "N references not found in Zotero (…), restored from the citation snapshot saved in this document" |
+
+Real recovery has two routes only: go back to the previous profile, or re-import the references into the current library — then hit "Relink in library" once and the keys reconnect.
+
+Three limits on this path:
+
+1. Relinking requires a unique hit. Two duplicates sharing a DOI, or a title differing by one word, are never auto-linked — the plugin would rather you search manually
+2. After relinking, `?zkeys=` in the body link carries the new key and the old one survives only in the snapshot; subsequent renders read the live item
+3. The snapshot keeps last render's order, so if you reorder items after switching libraries the narrative text may show a different order — check before switching
+
 ## 8 Limitations
 
 1. **Hard dependency on Zotero + Debug Bridge** — without it the plugin does nothing; it is not self-contained
@@ -220,7 +264,7 @@ Measured behaviour and limits:
 8. **Bibliography numbering follows the CSL style by default** — numeric styles produce `[1]` / `1.` (a leading `1. ` is written in escaped form so markdown does not turn it into an ordered list); author-date styles have none. You can switch to "no numbering" or a custom template (`{n}` = sequence) in settings. Check your journal's requirement before submission
 9. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
 10. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**
-11. **The snapshot is a fallback, not a backup** — `custom-zotero-bibsnap` only keeps the fields needed for rendering, so it keeps old documents looking right but cannot push items back into Zotero, and it cannot restore abstracts, notes or PDFs. Real recovery still means re-importing
+11. **The snapshot is a fallback, not a backup** — `custom-zotero-bibsnap` only keeps the fields needed for rendering, so it keeps old documents looking right but cannot push items back into Zotero, and it cannot restore abstracts, notes or PDFs. After switching libraries, "Relink in library" only helps for items that **already exist in the current library** (unique DOI / title match); if the paper is not there at all, nothing can help. Real recovery still means re-importing from a backup or library
 12. **Snapshot numbering is last time's** — with numeric styles `[n]` is assigned by CSL in document order, so a restored entry carries the previous number and may not match the current sequence; documents that never rendered successfully have no snapshot at all
 13. **The snapshot syncs with the document** — about 0.3 KB per reference (100 references ≈ 30 KB). It lands in the `.sy` file and travels with SiYuan sync, so citation-heavy documents carry a larger attribute value
 
@@ -235,6 +279,7 @@ Measured behaviour and limits:
 | Citation text | Rendered by the CSL style installed in Zotero; in-text and bibliography strings come from the same source and are re-rendered together when the style changes |
 | Bibliography | Entries are recognised by a `custom-zotero-bib` block attribute (old documents fall back to matching the heading text) and only those marked blocks are replaced; new entries are inserted back in place between the previous and next one, and marked by anchor; the heading is auto-generated, customised, or omitted entirely per settings; entry links carry `?bib=1` and are skipped on re-render, so deleted references never come back |
 | Citation snapshot | 27 CSL fields per reference (abstract, notes and tags dropped) plus the last rendered in-text/bibliography text, serialised to JSON, gzipped and base64-encoded into `custom-zotero-bibsnap` (prefix `z1:`; plain base64 with `j0:` when zlib is unavailable). The value contains no quotes, braces or underscores, which sidesteps the entity escaping and `_esc_newline_` rewriting of block attributes |
+| Library switching | Items are looked up across every library (group libraries included), not just My Library. When nothing is found the caller decides whether to fall back to the snapshot: the edit dialog, the form switch and a full re-render all absorb Zotero's `no-items`, which is no longer treated as fatal. "Relink in library" compares normalised DOIs exactly, then normalised titles for equality, and accepts only a unique hit |
 | Minimal writes | Each block's canonical content is computed first (code masked → block attributes stripped → zero-width characters removed); if it already matches and no attribute has leaked into the text, the block is skipped entirely. Best-effort writes fail quietly instead of turning a kernel error into a notification |
 | Undo | One stack per document, 20 steps, written back through the kernel `/api/transactions` API |
 | Runtime | SiYuan desktop renderer (Node available); the web and mobile clients have no port 23119 and cannot use it |
@@ -264,6 +309,7 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.34 | 2026-11-04 | **Surviving a switch of Zotero library (profile / data directory)**: the edit-citation dialog no longer shows a screenful of "(item no longer in library)" — titles, authors and years come from the document's citation snapshot, tagged "not in current library · from document snapshot"; a new "Relink in library" matches by DOI (title as fallback) and repoints stale keys at the same item in the current library; switching the default form / narrative, refreshing the document and saving after an edit all absorb `no-items` and continue from the snapshot instead of failing. Item lookups now span every library, group libraries included. **Fixed whitespace being eaten around citations**: collapsing legacy duplicate markup matched the surrounding blanks too, so every re-render deleted one space and the text drifted to `TN[(Case et al. 2012)`; non-duplicate matches are now returned untouched, and blocks are no longer rewritten needlessly. **Fixed mixed numbering in the bibliography**: an entry missing from the current library is now restored from the snapshot text (it used to be replaced by a "(item no longer in Zotero)" placeholder, losing both the text and its number), and a final pass normalises the numbering form based on the live-rendered entries, so a leftover `(1)` from an older numeric style can no longer sit inside an unnumbered author-date list. **Fixed bibliography order after a library switch**: missing keys used to be appended to the end, turning an author-date list from alphabetical into "live first, missing last" (measured: 6 of 7 missing, the entry originally 4th pushed to the top); author-date now sorts by each entry's own text (one correct answer, and it heals tables broken earlier), numeric restores from the newly stored `bibOrder`. **Fixed web-entry citations drifting on every render**: authorless, yearless web entries render as `(*Title*, n.d.)`, and that asterisk made SiYuan split the link into three segments, so one citation became three and re-split on every pass; emphasis markers are now stripped from body citation text and the link stays a single segment (bibliography entries keep their italics) |
 | 1.2.33 | 2026-11-04 | **Citation snapshot**: the trimmed CSL data and last rendered text of every reference are stored in the document attribute `custom-zotero-bibsnap`, so an item missing from Zotero is restored from the previous text and named in the notification (no more silent empty text / dropped reference in a merged citation / empty `↗` row). The bibliography is now rebuilt in place, so an appendix written after the list is no longer swallowed into it. Re-rendering no longer throws `tree not found` toasts; citations inside lists, tables and headings stop being rewritten on every run; a just-inserted citation no longer stays unrendered; command-palette failures are reported. Added a 30-case automated test suite (idempotency / snapshot / missing item / undo / concurrency / 100-reference scale) |
 | 1.2.32 | 2026-11-04 | Default style pinned to APA, which ships with every Zotero install, so first use can no longer fail on a missing style; a style missing on this machine now refuses to refresh (instead of silently swapping in another style) and the settings panel shows a red warning plus a one-click "use the built-in APA" button |
 | 1.2.31 | 2026-11-04 | Setup guide moved to a new domain (`ttchen.cn42.ug.link`, the old luyouxia tunnel was unstable); added a "Plugin settings…" item to the citation context menu |

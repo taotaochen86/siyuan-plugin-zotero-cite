@@ -273,13 +273,20 @@ async function zoteroExec(settings, code) {
     throw new Error("Zotero 返回了非预期内容：" + v.slice(0, 300));
   }
   if (v && v.error) {
-    throw new Error(v.error === "no-items"
+    const err = new Error(v.error === "no-items"
       ? "这些条目在 Zotero 里找不到（可能已删除或换了库）：" + (v.missing || []).join(", ")
       : v.error === "style-missing"
         ? "本机 Zotero 里没有这个 CSL 样式：" + v.wanted +
           "。自定义样式不随 Zotero 账号同步，换电脑要手动把 .csl 装到本机；" +
           "或在插件设置里换一个已装样式。本机现有样式：" + (v.available || []).join(" / ")
         : String(v.error));
+    /*
+     * 把 Zotero 侧的出错类型带出来：调用方要区分「条目查不到」（可以退回文档存档，
+     * 属于可恢复）与「样式没装 / 连不上」（必须报给用户），不能一律当致命错误。
+     */
+    err.zcode = v.error;
+    err.zdata = v;
+    throw err;
   }
   return v;
 }
@@ -761,6 +768,26 @@ function escapeLooseBrackets(md) {
   return s;
 }
 
+/**
+ * 拆出文末条目开头的编号前缀，返回 { label, head, n, body } 或 null。
+ *
+ * 口径与 cslNumRe 一致：`[1]` / `［1］` / `(1)` / `（1）` / `1.` / `1、` / `1)`。
+ * ⚠️ 必须排除「年份开头」的样式：有的样式条目本身就是 `(2020). Title…` 或 `2020. Title…`，
+ *    把 2020 当编号会把整条正文剥掉。判据用「编号不可能大到年份那个量级」。
+ */
+function splitBibHead(text) {
+  const s = String(text || "");
+  const m = /^\s*(\[\s*\d+\s*\]|［\s*\d+\s*］|\(\s*\d+\s*\)|（\s*\d+\s*）|\d{1,4}\s*[.、．)）])\s*/.exec(s);
+  if (!m) {
+    return null;
+  }
+  const n = Number((m[1].match(/\d+/) || ["0"])[0]);
+  if (!n || n > 999) {
+    return null;
+  }
+  return { label: m[1], head: m[0], n: n, body: s.slice(m[0].length) };
+}
+
 /* ============================ 引用记录（正文回收） ============================ */
 
 /**
@@ -860,7 +887,15 @@ function collapseCiteMarkup(kd) {
     }
     // 即使丢掉这一份也要推进 lastEnd：三层残留是连着来的
     lastEnd = end;
-    return dup ? "" : link;
+    /*
+     * ⚠️ 非重复时必须原样返回 full，不能返回 link。
+     *    unit 的前后段 `([ \t\u00a0\u200b]|\*)*` 和 `[ \t\*]*` 把链接两侧的空白
+     *    也吃进了匹配范围；以前统一 return link，等于每重排一次就把引用两侧的空格
+     *    删掉一处，正文变成 `TN[(Case et al. 2012)`，切换 CSL 样式时尤其明显
+     *    （2026-11-04 用户报的现象就是这个）。返回 full 即「这一份一个字符都不动」，
+     *    真正要合并的重复份仍然整个丢掉。
+     */
+    return dup ? "" : full;
   });
   return dropStrayScriptTags(s);
 }
@@ -1052,13 +1087,29 @@ function promoteMenuItems(menu, before) {
 function escapeLinkText(s) {
   return String(s || "").replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
 }
+/**
+ * 正文引用文本里绝不能出现强调标记（`*` / `<i>`）。
+ *
+ * 实测（2026-11-04，思源 3.8.9）：`[(*标题*, 不详)](zotero://…)` 会被 Lute 拆成三段链接 ——
+ * `[(](…)​*[标题](…)​*[, 不详)](…)`，因为强调标记在链接文本里形成了嵌套；
+ * 下一轮扫描就把这一处当成 3 条独立引用，每重排一次再拆一次，永远不收敛
+ * （`<i>` 与 `*` 结果完全相同，都是被当成强调处理）。
+ *
+ * 网页类条目（无作者、无年份）恰恰最常渲染出 `(*标题*, 不详)` 这种形态，
+ * 所以只要引用里出现斜体就必须剥掉。强调只是装饰，剥掉不影响可读性；
+ * 宁可少一个斜体，也不能让链接结构坏掉、让重排永不幂等。
+ * ⚠️ 只用于正文引用。文末条目是独立段落，不嵌链接，斜体照常保留。
+ */
+function stripEmphasis(s) {
+  return String(s || "").replace(/\*+/g, "");
+}
 function unescapeLinkText(s) {
   return String(s || "").replace(/\\([\\\[\]])/g, "$1");
 }
 
 /** 生成一条引用链接的 markdown。fmtId 决定这处引用怎么呈现，写进 ?f= */
 function makeCiteLink(text, keys, settings, fmtId) {
-  const label = escapeLinkText(text);
+  const label = escapeLinkText(stripEmphasis(text));
   if (!settings.linkEnabled) {
     return label.replace(/\\/g, "");
   }
@@ -1173,6 +1224,28 @@ async function readSnapshot(docId, attrs) {
   }
 }
 
+/**
+ * 在快照 clusters 里找「这一处引用」。
+ *
+ * 先按原样的 key 顺序找（绝大多数情况一次命中）；顺序变了（用户在对话框里调过先后）
+ * 就按 key 集合相等再找一遍 —— 同一组文献的显示文本，顺序换了文本也基本一致，
+ * 拿它兜底远好过报「取不到」。
+ */
+function pickCluster(clusters, keys) {
+  if (!clusters) {
+    return null;
+  }
+  const exact = clusters[keys.join("|")];
+  if (exact) {
+    return exact;
+  }
+  const want = keys.slice().sort().join("|");
+  const hit = Object.keys(clusters).find(
+    (ck) => ck.split("|").slice().sort().join("|") === want
+  );
+  return hit ? clusters[hit] : null;
+}
+
 async function writeSnapshot(docId, snap) {
   try {
     await fetchSyncPost("/api/attr/setBlockAttrs", {
@@ -1185,22 +1258,124 @@ async function writeSnapshot(docId, snap) {
   }
 }
 
-/** 按 key 批量取条目元数据（编辑引用对话框用） */
+/**
+ * 按 key 批量取条目元数据（编辑引用对话框用）。
+ *
+ * found=false 表示「这个 key 在当前 Zotero 里找不到」。对话框据此退回文档快照显示，
+ * 不能像以前那样直接写一句「(该条目已不在库里)」——换了 Zotero profile（数据目录）
+ * 之后 key 会成批失效，用户看到的是一屏同样的空行，既不知道是哪篇，也不知道能不能救。
+ *
+ * 查找范围是「所有库」而不只是我的文库：条目可能被搬进群组库。
+ */
 async function fetchMetaByKeys(settings, keys) {
   const code = `
 const lib = Zotero.Libraries.userLibraryID;
+const libs = [];
+try {
+  (Zotero.Libraries.getAll() || []).forEach(function (l) {
+    if (libs.indexOf(l.libraryID) < 0) { libs.push(l.libraryID); }
+  });
+} catch (e) {}
+if (libs.indexOf(lib) < 0) { libs.unshift(lib); }
+function zcItem(k) {
+  for (let i = 0; i < libs.length; i++) {
+    const it = Zotero.Items.getByLibraryAndKey(libs[i], k);
+    if (it) { return it; }
+  }
+  return null;
+}
 const ks = ${JSON.stringify(keys)};
 const out = ks.map(function (k) {
-  const it = Zotero.Items.getByLibraryAndKey(lib, k);
-  if (!it) { return {key: k, title: "(该条目已不在库里)", authors: "", year: "", itemType: ""}; }
+  const it = zcItem(k);
+  if (!it) { return {key: k, found: false, title: "", authors: "", year: "", itemType: ""}; }
   return {
-    key: it.key,
+    key: k,
+    found: true,
     title: String(it.getField("title") || ""),
     year: String(it.getField("date") || "").slice(0, 4),
     authors: (it.getCreators() || []).map(function (c) { return c.lastName || c.name || ""; }).join(", "),
     itemType: Zotero.ItemTypes.getName(it.itemTypeID)
   };
 });
+return JSON.stringify({items: out});
+`;
+  const r = await zoteroExec(settings, code);
+  return (r && r.items) || [];
+}
+
+/** 快照里的精简 CSL：取标题/作者/年份（兼容 date-parts 与插件自己的 {year,month} 两种写法） */
+function cslTitle(csl) {
+  return String((csl && csl.title) || "");
+}
+function cslYear(csl) {
+  const is = (csl && csl.issued) || {};
+  if (is.year) { return String(is.year); }
+  const dp = is["date-parts"];
+  return (dp && dp[0] && dp[0][0]) ? String(dp[0][0]) : "";
+}
+function cslAuthors(csl) {
+  const a = (csl && csl.author) || [];
+  return a.map(x => x.family || x.literal || x.name || "").filter(Boolean).join(", ");
+}
+
+/**
+ * 按 DOI / 标题在当前 Zotero 库里把旧 key 接回同名条目。
+ *
+ * 场景：换了 Zotero profile、或把文献从别处重新导入，条目内容没变但 item key 变了，
+ * 文档里存的还是旧 key。此时只要能按 DOI 或标题唯一命中，就能把引用重新接上，
+ * 而不是永久锁死在快照上。
+ *
+ * 只认「唯一命中」：DOI 归一化后相等，或标题归一化后全等；命中多条一律放弃，
+ * 宁可让用户手动指定，也不能把 A 的引用接到 B 上。
+ */
+async function relinkEntries(settings, asks) {
+  const code = `
+const lib = Zotero.Libraries.userLibraryID;
+const asks = ${JSON.stringify(asks)};
+const norm = function (s) {
+  return String(s || "").toLowerCase().replace(/[^0-9a-z\\u00c0-\\u024f\\u4e00-\\u9fff]+/g, "");
+};
+const reg = function (ids) {
+  return ids.map(function (id) { return Zotero.Items.get(id); })
+    .filter(function (x) { return x && x.isRegularItem && x.isRegularItem(); });
+};
+const out = [];
+for (let i = 0; i < asks.length; i++) {
+  const a = asks[i];
+  let hit = null;
+  let how = "";
+  const doi = String(a.doi || "").trim().replace(/^https?:\\/\\/(dx\\.)?doi\\.org\\//i, "");
+  if (doi) {
+    const s = new Zotero.Search();
+    s.libraryID = lib;
+    s.addCondition("DOI", "is", doi);
+    const cand = reg(await s.search());
+    if (cand.length === 1) { hit = cand[0]; how = "doi"; }
+    else if (cand.length > 1) {
+      const t = norm(a.title);
+      const same = cand.filter(function (x) { return norm(x.getField("title")) === t; });
+      if (same.length === 1) { hit = same[0]; how = "doi+title"; }
+    }
+  }
+  if (!hit && a.title) {
+    const words = String(a.title).split(/\\s+/).filter(Boolean).slice(0, 8).join(" ");
+    if (words) {
+      const s = new Zotero.Search();
+      s.libraryID = lib;
+      s.addCondition("title", "contains", words);
+      const t = norm(a.title);
+      const cand = reg(await s.search()).filter(function (x) { return norm(x.getField("title")) === t; });
+      if (cand.length === 1) { hit = cand[0]; how = "title"; }
+    }
+  }
+  out.push({
+    key: a.key,
+    newKey: hit ? hit.key : null,
+    title: hit ? String(hit.getField("title") || "") : "",
+    year: hit ? String(hit.getField("date") || "").slice(0, 4) : "",
+    how: how
+  });
+}
 return JSON.stringify({items: out});
 `;
   const r = await zoteroExec(settings, code);
@@ -2245,11 +2420,23 @@ module.exports = class ZoteroCite extends Plugin {
     await prevLock;
     try {
       // 第一步：只渲染这一处
-      let rendered = await zoteroExec(this.settings, buildRenderScript({
-        keys,
-        clusters: [keys],
-        styleId: this.settings.styleId,
-      }));
+      /*
+       * 条目在当前 Zotero 里全查不到时，Zotero 侧会报 no-items。那不是致命错误
+       * （换了 profile、数据目录就会这样），下面还有文档存档可以兜底，先别抛。
+       */
+      let rendered;
+      try {
+        rendered = await zoteroExec(this.settings, buildRenderScript({
+          keys,
+          clusters: [keys],
+          styleId: this.settings.styleId,
+        }));
+      } catch (e) {
+        if (e.zcode !== "no-items") {
+          throw e;
+        }
+        rendered = { cites: {}, order: [], style: null };
+      }
       let rec = (rendered.cites && rendered.cites[keys.join("|")]) || null;
 
       // 数字式特征：渲染出来就是一串编号（[1] / <sup>1</sup> / (1)），没有作者年文本
@@ -2275,31 +2462,61 @@ module.exports = class ZoteroCite extends Plugin {
             if (!seen.has(keys.join("|"))) {
               list.push(keys);
             }
-            rendered = await zoteroExec(this.settings, buildRenderScript({
-              keys: scan.keys.concat(keys.filter(k => scan.keys.indexOf(k) < 0)),
-              clusters: list,
-              styleId: this.settings.styleId,
-            }));
-            rec = (rendered.cites && rendered.cites[keys.join("|")]) || rec;
+            try {
+              rendered = await zoteroExec(this.settings, buildRenderScript({
+                keys: scan.keys.concat(keys.filter(k => scan.keys.indexOf(k) < 0)),
+                clusters: list,
+                styleId: this.settings.styleId,
+              }));
+              rec = (rendered.cites && rendered.cites[keys.join("|")]) || rec;
+            } catch (e) {
+              // 同上：全篇条目都查不到时继续用上一轮（或存档）的结果，不打断切换
+              if (e.zcode !== "no-items") {
+                throw e;
+              }
+            }
           }
         }
       }
 
       const narrable = rendered.narrativeSupported !== false;
-      this._lastRendered = {
-        narrativeSupported: narrable,
-        styleTitle: (rendered.style && rendered.style.title) || null,
-      };
+      // 一条都取不到时 rendered 里没有样式信息，别把上次的「样式形态」冲掉：
+      // 右键菜单靠它决定「叙述式」能不能点
+      if (rendered.style) {
+        this._lastRendered = {
+          narrativeSupported: narrable,
+          styleTitle: rendered.style.title || null,
+        };
+      }
       if (fmt === "narr" && !narrable) {
         throw new Error("当前是数字式样式，没有叙述式写法");
       }
 
+      /*
+       * 这几条在当前 Zotero 里取不到（换了 profile / 数据目录后 item key 对不上）时，
+       * 用文档存档里那次的成品来切换格式：
+       *   csl  → clusters[ck].c（上次样式渲染出的引用原文）
+       *   narr → clusters[ck].np（上次的叙述式零件）
+       * 存档就是「本机曾经真实渲染过」的结果，格式与当前样式一致，直接用它切换即可，
+       * 不该因为库里查不到就拒绝——正文文本本来就不依赖 Zotero 在线。
+       */
+      if (!rec || (fmt === "narr" && !(rec.np && rec.np.length))) {
+        const docId = (anchor && anchor.docId) || this.getDocId();
+        const snap = docId ? await readSnapshot(docId) : null;
+        const prev = pickCluster(snap && snap.clusters, keys);
+        if (prev && prev.c) {
+          rec = { c: prev.c, np: prev.np || [] };
+        }
+      }
+
       if (!rec) {
-        throw new Error("没拿到 CSL 渲染结果（这几篇文献可能已从 Zotero 删除）");
+        throw new Error("没拿到 CSL 渲染结果（这几篇文献不在当前 Zotero 库里，文档里也没有它们的存档）");
       }
       const text = fmt === "narr" ? joinNarrParts(rec.np) : cslHtmlToMarkdown(rec.c);
       if (!text) {
-        throw new Error("样式没有给出这一处的显示文本");
+        throw new Error(fmt === "narr"
+          ? "这几条在当前 Zotero 里查不到，文档存档里也没有它们的叙述式写法，先切回默认格式"
+          : "样式没有给出这一处的显示文本");
       }
 
       // 只写这一块：patchCiteAt 自带单块撤销快照
@@ -2314,14 +2531,52 @@ module.exports = class ZoteroCite extends Plugin {
 
   /** 编辑这处引用：勾选保留的条目、从 Zotero 追加、搜索添加 */
   async openCiteEditDialog(anchor, keys) {
-    const rows = [];
+    const docId = (anchor && anchor.docId) || null;
+    /*
+     * 文档里存着上次成功重排时的条目存档（custom-zotero-bibsnap）。
+     * 换了 Zotero profile / 数据目录之后，库里的 item key 会成批对不上，
+     * 那时这张存档就是唯一还能说清「这几条原本是哪几篇」的东西 —— 必须读它，
+     * 否则整屏都是「(该条目已不在库里)」。
+     */
+    const snap = docId ? await readSnapshot(docId) : null;
+    const snapRec = (k) => (snap && snap.items && snap.items[k]) || null;
+
     let metas = [];
     try {
       metas = await fetchMetaByKeys(this.settings, keys);
     } catch (e) {
-      metas = keys.map(k => ({ key: k, title: k, authors: "", year: "" }));
+      // Zotero 没开 / 令牌失效：条目本身还在，别把列表清空，先按 key 站着，下面照样读存档
+      metas = keys.map(k => ({ key: k, found: null, title: "", authors: "", year: "" }));
     }
-    metas.forEach(m => rows.push({ key: m.key, title: m.title, sub: [m.authors, m.year].filter(Boolean).join(" · "), keep: true }));
+    const metaBy = {};
+    metas.forEach((m) => { metaBy[m.key] = m; });
+
+    /** 一条列表项：库里有的用库里元数据；库里没有的退回文档存档；都没有才承认「查不到」 */
+    const rowOf = (k) => {
+      const m = metaBy[k];
+      const csl = (snapRec(k) && snapRec(k).csl) || null;
+      if (m && m.found) {
+        return { key: k, title: m.title || "(无题名)", sub: [m.authors, m.year].filter(Boolean).join(" · "), keep: true };
+      }
+      if (csl) {
+        return {
+          key: k,
+          title: cslTitle(csl) || "(无题名)",
+          sub: [cslAuthors(csl), cslYear(csl)].filter(Boolean).join(" · "),
+          keep: true,
+          missing: true,
+          snap: true,
+        };
+      }
+      return {
+        key: k,
+        title: m && m.title ? m.title : "（该条目已不在库里）",
+        sub: ["文档里也没有它的存档，重排时这一处保持原样", k].filter(Boolean).join(" · "),
+        keep: true,
+        missing: true,
+      };
+    };
+    const rows = keys.map(rowOf);
 
     const dlg = new Dialog({
       title: "编辑文献引用",
@@ -2337,6 +2592,7 @@ module.exports = class ZoteroCite extends Plugin {
         </div>
         <div class="zc-foot">
           <span class="zc-tip"></span>
+          <button class="b3-button b3-button--outline zc-relink">在库里找回</button>
           <button class="b3-button b3-button--outline zc-addsel">追加 Zotero 选中</button>
           <button class="b3-button b3-button--cancel zc-cancel">取消</button>
           <button class="b3-button zc-btn-primary zc-ok">保存</button>
@@ -2351,6 +2607,7 @@ module.exports = class ZoteroCite extends Plugin {
     const tipEl = el.querySelector(".zc-tip");
     const qEl = el.querySelector(".zc-q");
     const noteEl = el.querySelector(".zc-note__text");
+    const relinkBtn = el.querySelector(".zc-relink");
 
     const render = () => {
       if (!rows.length) {
@@ -2359,19 +2616,27 @@ module.exports = class ZoteroCite extends Plugin {
         return;
       }
       const keepCount = rows.filter(r => r.keep).length;
-      noteEl.innerHTML = `共 <b>${rows.length}</b> 条 · 保留 <b>${keepCount}</b> 条　取消勾选即移除，保存后正文自动重排`;
+      const missCount = rows.filter(r => r.missing).length;
+      noteEl.innerHTML = `共 <b>${rows.length}</b> 条 · 保留 <b>${keepCount}</b> 条　取消勾选即移除，保存后正文自动重排` +
+        (missCount ? `　<span class="zc-note__warn">${missCount} 条不在当前 Zotero 库</span>` : "");
+      // 只有真的还有「库里查不到」的条目，找回按钮才有意义
+      relinkBtn.classList.toggle("fn__none", !missCount);
       let ord = 0;
       listEl.innerHTML = rows.map((r, i) => {
         if (r.keep) {
           ord += 1;
         }
         return `
-        <label class="zc-item ${r.keep ? "zc-item--on" : "zc-item--off"}">
+        <label class="zc-item ${r.keep ? "zc-item--on" : "zc-item--off"}${r.missing ? " zc-item--miss" : ""}">
           <span class="zc-ord">${r.keep ? ord : ""}</span>
           <input type="checkbox" class="zc-cb" data-i="${i}" ${r.keep ? "checked" : ""} />
           <div class="zc-meta">
             <div class="zc-title">${String(r.title || "(无题名)").replace(/</g, "&lt;")}</div>
-            <div class="zc-sub">${String(r.sub || "").replace(/</g, "&lt;")}</div>
+            <div class="zc-sub">${String(r.sub || "").replace(/</g, "&lt;")}${
+              r.missing
+                ? `<span class="zc-tag">${r.snap ? "当前库查不到 · 取自文档存档" : "当前库查不到 · 无存档"}</span>`
+                : ""
+            }</div>
           </div>
         </label>`;
       }).join("");
@@ -2383,6 +2648,64 @@ module.exports = class ZoteroCite extends Plugin {
       });
     };
     render();
+
+    /*
+     * 开局就把「为什么这几条查不到」讲明白：用户看到一屏「不在库里」时第一反应是
+     * 文档数据坏了，其实只是 Zotero 换了 profile / 数据目录，条目 key 对不上了。
+     * 只给一句短的：底栏还要塞四个按钮，长提示会挤成两行。
+     */
+    if (rows.some(r => r.missing)) {
+      tipEl.textContent = "标题取自文档存档，可点「在库里找回」重接";
+    }
+
+    el.querySelector(".zc-relink").addEventListener("click", async () => {
+      const asks = rows.filter(r => r.missing).map((r) => {
+        const csl = ((snapRec(r.key) || {}).csl) || {};
+        return {
+          key: r.key,
+          doi: String(csl.DOI || ""),
+          title: String(csl.title || r.title || ""),
+        };
+      });
+      if (!asks.length) {
+        return;
+      }
+      const btn = el.querySelector(".zc-relink");
+      btn.disabled = true;
+      tipEl.textContent = "在 Zotero 库里按 DOI / 标题比对…";
+      try {
+        const found = await relinkEntries(this.settings, asks);
+        let n = 0;
+        found.forEach((x) => {
+          if (!x.newKey) {
+            return;
+          }
+          const r = rows.find(y => y.missing && y.key === x.key);
+          if (!r) {
+            return;
+          }
+          // 该条目已经被用户手动搜进来过了：不再重复占一行，只标一句
+          if (rows.some(y => y !== r && y.key === x.newKey)) {
+            r.title = `${r.title}（与列表中另一条重复）`;
+            return;
+          }
+          r.key = x.newKey;
+          r.missing = false;
+          r.snap = false;
+          r.title = x.title || r.title;
+          r.sub = [r.sub, "已接回 Zotero 条目"].filter(Boolean).join(" · ");
+          n++;
+        });
+        render();
+        tipEl.textContent = n
+          ? `已接回 ${n} 条，保存后正文按现在这份 Zotero 库重排`
+          : "库里没找到同一条目（DOI 与标题都没有唯一命中）——这批文献可能不在当前 Zotero 库里";
+      } catch (e) {
+        tipEl.textContent = String(e.message || e);
+      } finally {
+        btn.disabled = false;
+      }
+    });
 
     const push = (items, keep) => {
       let added = 0;
@@ -2880,12 +3203,26 @@ module.exports = class ZoteroCite extends Plugin {
     blocks.forEach((b) => {
       groupCites(maskCode(b.kd).s, this.settings.defaultFormat).forEach((g) => pushCluster(g.keys));
     });
-    const rendered = await zoteroExec(this.settings, buildRenderScript({
-      keys: scan.keys,
-      clusters,
-      styleId: this.settings.styleId,
-      cslKeep: SNAP_CSL_KEEP,
-    }));
+    /*
+     * ⚠️ 全篇条目都在当前 Zotero 里查不到（换了 profile / 数据目录后 item key 成批失效）时，
+     *    Zotero 侧会报 no-items 而不是返回一份空结果。这里必须接住：
+     *    下面本来就有「快照兜底」这条路，能让正文与文末原样保留；
+     *    如果直接把它当致命错误抛出去，「刷新本篇」就彻底不可用了。
+     */
+    let rendered;
+    try {
+      rendered = await zoteroExec(this.settings, buildRenderScript({
+        keys: scan.keys,
+        clusters,
+        styleId: this.settings.styleId,
+        cslKeep: SNAP_CSL_KEEP,
+      }));
+    } catch (e) {
+      if (e.zcode !== "no-items") {
+        throw e;
+      }
+      rendered = { order: [], cites: {}, bibByKey: {}, bibOrder: [], style: null, snapCsl: {} };
+    }
     /*
      * 有文献在当前 Zotero 里取不到（被删了、或这台机没同步全）时，用文档里的旧快照兜底：
      *   · 文末条目 → 恢复上次渲染出的条目原文，不再出现只有 ↗ 的空行；
@@ -2895,6 +3232,13 @@ module.exports = class ZoteroCite extends Plugin {
     const prevSnap = await readSnapshot(docId);
     const renderedKeys = new Set(rendered.order || []);
     const missingKeys = scan.keys.filter((k) => !renderedKeys.has(k));
+    /*
+     * 哪几条是「用快照顶上的」。下游 rebuildBibliography 必须知道这件事：
+     * 快照 html 也被塞进了 bibByKey，光看「bibByKey 有没有内容」分不出实时与存档，
+     * 文献表补坏时就没法判断该怎么修顺序（2026-11-04 踩过：加了排序代码却完全不生效，
+     * 因为 live 恒为 true）。
+     */
+    rendered.snapKeys = missingKeys.slice();
     let snapBib = 0;
     let snapCite = 0;
     if (missingKeys.length && prevSnap) {
@@ -2932,11 +3276,14 @@ module.exports = class ZoteroCite extends Plugin {
       });
     }
     const narrable = rendered.narrativeSupported !== false;
-    // 记住这次用的样式形态，右键菜单要据此决定「叙述式」能不能点
-    this._lastRendered = {
-      narrativeSupported: narrable,
-      styleTitle: (rendered.style && rendered.style.title) || null,
-    };
+    // 记住这次用的样式形态，右键菜单要据此决定「叙述式」能不能点。
+    // 一条都没取到（全用快照）时 rendered 里没有样式信息，别把上次记的清空。
+    if (rendered.style) {
+      this._lastRendered = {
+        narrativeSupported: narrable,
+        styleTitle: rendered.style.title || null,
+      };
+    }
 
     /**
      * 某处引用的正文内容。
@@ -2994,12 +3341,18 @@ module.exports = class ZoteroCite extends Plugin {
       // ⚠️ 写盘前必须剥掉块属性：kramdown 的属性是紧贴正文的，按 markdown 写回去
       //    有可能被当成正文，用户就会看到 `…(2020)}{: id="…" updated="…"}`。
       const out = unmaskCode(stripBlockAttrs(masked), mk.store);
+      /*
+       * 比较与写盘都用规范化内容（去零宽）。
+       * 思源在行内元素之间常塞 U+200B，读回来带、写之前不带时会算出「变了」，
+       * 于是每次重排都白写一遍整篇（幂等测试里表现为「第 2 轮又改了 N 块」）。
+       */
+      const outNorm = canonicalContent(out);
       // 两个触发条件：
-      //   1) 内容真的变了（剥属性后比，避免 updated 每次都变导致无谓重写）
+      //   1) 内容真的变了（规范化后比，避免零宽 / updated 导致无谓重写）
       //   2) 块属性已经脏了 —— 剥离后新旧会一模一样，光比内容永远判不出来，
       //      必须强制写一次把残留的 `{: id="…"}` 从正文里清掉
-      if (out !== canonicalContent(kdRaw) || attrsAreDirty(kdRaw)) {
-        todo.push({ id: b.id, oldKd: kdRaw, next: out });
+      if (outNorm !== canonicalContent(kdRaw) || attrsAreDirty(kdRaw)) {
+        todo.push({ id: b.id, oldKd: kdRaw, next: outNorm });
       }
     }
     if (todo.length) {
@@ -3072,6 +3425,12 @@ module.exports = class ZoteroCite extends Plugin {
       style: this.settings.styleId,
       items: snapItems,
       clusters: snapClusters,
+      /*
+       * 文献表顺序：换 Zotero profile 后会有条目查不到，那时只能靠「上一次的真实顺序」
+       * 把它们插回原位，否则文献表会变成「实时的在前、缺的在后」。
+       * 只存顺序、不存编号，重排时编号仍由样式与设置重新决定。
+       */
+      bibOrder: Array.isArray(this._lastBibOrder) ? this._lastBibOrder : [],
     };
     try {
       const fmtCount = {};
@@ -3248,16 +3607,141 @@ module.exports = class ZoteroCite extends Plugin {
     const keepCsl = numMode === "" || numMode === "csl";
     let seq = 0;
 
-    list.forEach((k) => {
-      const raw = (rendered.bibByKey && rendered.bibByKey[k]) || "";
-      let text = cslHtmlToMarkdown(raw);
-      /*
-       * 取不到条目正文（Zotero 里已删、这台机又没同步到）且文档里也没存快照时，
-       * 绝不要只写一条「↗」—— 用户看到的是一个没有内容的空行，还以为文档坏了。
-       * 明写一句占位，至少知道是哪条、怎么处理。
-       */
+    /*
+     * 有条目在当前库里查不到（换了 Zotero profile / 条目被删 / 这台机还没同步到）时，
+     * 先读一次文档快照，用快照里存着的条目原文顶上。
+     *
+     * ⚠️ 不能只写占位符：快照里明明存着全文，却把它降级成「（文献已不在 Zotero 库中：key）」，
+     *    用户看到的是文献表少了一条 —— 更糟的是那一条既没有正文、又带着旧样式留下的编号，
+     *    与其余条目并排就是「部分编号、部分不编号」的混排。
+     *    （2026-11-04 用户实测：JU9W4XI5 那条只剩一个 `(1)` 前缀 + 数字式样式的旧正文。）
+     * 只在真缺条目时才读属性，正常重排一次属性都不多读。
+     */
+    let snapBib = null;
+    let snapRec = null;
+    if (list.some((k) => !String((rendered.bibByKey && rendered.bibByKey[k]) || "").trim())) {
+      snapRec = await readSnapshot(docId);
+      const items = (snapRec && snapRec.items) || {};
+      snapBib = (k) => String((items[k] && items[k].bib) || "");
+    }
+
+    // ── 第一遍：每条先拿到「正文」，实时渲染缺的走快照兜底 ──
+    const snapKeySet = new Set((rendered && rendered.snapKeys) || []);
+    let rows = list.map((k) => {
+      const html = String((rendered.bibByKey && rendered.bibByKey[k]) || "").trim()
+        || (snapBib ? snapBib(k) : "");
+      // live 只能代表「这条来自 Zotero 实时渲染」，存档补进来的不算
+      return { k: k, text: cslHtmlToMarkdown(html), live: !!html && !snapKeySet.has(k) };
+    });
+
+    /*
+     * 顺序复原（换 Zotero profile / 数据目录，或条目被删时）。
+     *
+     * 缺条的 key 在上一步被一律追加到 `list` 末尾，于是文献表变成「实时渲染的在前、
+     * 缺条的挤在后」，作者年式样式本该按作者字母序 —— 一眼就是乱的。
+     * 2026-11-04 实测：7 条里 6 条在当前库查不到，唯一的实时条目（许育新）被顶到第一位，
+     * 整张表从 Case→…→许育新 变成 许育新、Ge、Dela Cruz、Ye、Case、Oh、Harris。
+     *
+     * 两条路，按样式类型分：
+     *   · 数字式（条目带 [1] / 1. 前缀）：顺序 = 正文引用顺序，算不出来，只能靠快照
+     *     记下的上一次真实顺序；连快照都没有就退回 keys 的原顺序。
+     *   · 作者年式：顺序 = 作者字母序，有唯一正确答案，直接按条目正文排。
+     *     这也是「自愈」——历史上被排坏过一次的表，重排就能修回来。
+     *     ⚠️ 不能只信快照 bibOrder：它记的是「上次写进文档的顺序」，文档本身是坏的，
+     *        记下来就是坏的，越记越锁死（第一版就栽在这）。
+     *   ⚠️ 排序不能用 localeCompare(…, "zh")：那会按拼音把「许育新」排到 Ye 之前，
+     *      而 CSL 里中文条目一律在拉丁字母之后，用码位比较才是对的。
+     */
+    if (rows.some((r) => !r.live)) {
+      const liveRows = rows.filter((r) => r.live);
+      const numbered = (liveRows.length ? liveRows : rows).some((r) => splitBibHead(r.text));
+      if (numbered) {
+        const saved = snapRec && Array.isArray(snapRec.bibOrder)
+          ? snapRec.bibOrder.filter((k) => set.has(k))
+          : null;
+        const sameStyle = !snapRec || !snapRec.style || snapRec.style === this.settings.styleId;
+        const byKey = new Map(rows.map((r) => [r.k, r]));
+        if (saved && saved.length === rows.length && sameStyle) {
+          rows = saved.map((k) => byKey.get(k)).filter(Boolean);
+        } else {
+          /*
+           * 换了样式（作者年式 → 数字式）或没有历史顺序：编号顺序 = 正文引用顺序，
+           * 退回扫描到的 key 原顺序 —— 这是唯一还能拿到的「引用先后」信息。
+           * 直接把实时渲染的那条放最前是错的（实测：许育新从第 4 条被顶成 [1]）。
+           */
+          rows = keys.filter((k) => byKey.has(k)).map((k) => byKey.get(k));
+        }
+      } else {
+        const sk = (r) => {
+          const h = splitBibHead(r.text);
+          return String((h ? h.body : r.text) || "")
+            .replace(/^[\s"'“”‘’([［]+/, "")
+            .toLowerCase();
+        };
+        rows = rows.slice().sort((a, b) => {
+          const x = sk(a);
+          const y = sk(b);
+          return x < y ? -1 : x > y ? 1 : 0;
+        });
+      }
+    }
+    // 记下这一版真正写进文档的顺序，下一次换库时就靠它复原
+    this._lastBibOrder = rows.map((r) => r.k);
+
+    /*
+     * 编号形态归一（跟随 CSL 模式）。
+     * 症状：同一张文献表里「有的条目带 1. / [1] / (1)，有的什么都不带」。
+     * 成因：跌回快照的那条自带别的样式（多半是顺序编码制）留下的编号，而当前样式
+     *       是作者年式、本来根本没有编号 —— 两者并排就是混排。
+     * 规则：有前缀的条数既不是 0 也不是全部 → 判定混排，整表统一。
+     *   怎么统一，以「实时渲染的那几条」为准，不听快照的：
+     *     · 实时条目全无前缀 → 作者年式 → 把混进来的一律剥掉；
+     *     · 实时条目都带前缀 → 数字式   → 把缺的补齐成连号。
+     * 正常情况（全无前缀 / 全有前缀）一个字都不改。
+     */
+    if (keepCsl) {
+      const headOf = (r) => (r.text.trim() ? splitBibHead(r.text) : null);
+      const heads = rows.map(headOf);
+      const alive = rows.filter((r) => r.text.trim());
+      const nums = heads.filter(Boolean);
+      if (nums.length && nums.length < alive.length) {
+        const live = rows.filter((r) => r.text.trim() && r.live);
+        const liveNums = live.filter((r) => headOf(r)).length;
+        const shouldNumber = live.length
+          ? liveNums * 2 > live.length
+          : nums.length * 2 > alive.length;
+        if (shouldNumber) {
+          const liveHead = live.length ? (live.map(headOf).find(Boolean) || null) : null;
+          // 模板：`1.` → `{n}.`，`[1]` → `[{n}]`，`(1)` → `({n})`
+          const tpl = String((liveHead || nums[0]).label).replace(/\d+/, "{n}");
+          let n = 0;
+          rows.forEach((r, i) => {
+            if (!r.text.trim()) {
+              return;
+            }
+            n++;
+            const h = heads[i];
+            r.text = tpl.replace("{n}", String(n)) + " " + (h ? h.body : r.text.trim());
+          });
+        } else {
+          rows.forEach((r, i) => {
+            if (heads[i]) {
+              r.text = heads[i].body;
+            }
+          });
+        }
+      }
+    }
+
+    // ── 第二遍：按设置定编号，再转义、挂跳转链接 ──
+    rows.forEach((r) => {
+      let text = r.text;
       if (!text.trim()) {
-        entries.push("（文献已不在 Zotero 库中：" + k + "）");
+        /*
+         * 实时渲染和快照都取不到：绝不要只写一条「↗」—— 用户看到的是一个没有内容的
+         * 空行，还以为文档坏了。明写一句占位，至少知道是哪条、怎么处理。
+         */
+        entries.push("（文献已不在 Zotero 库中：" + r.k + "）");
         return;
       }
       if (keepCsl) {
@@ -3280,7 +3764,7 @@ module.exports = class ZoteroCite extends Plugin {
       text = escapeLooseBrackets(text);
       // 文末条目的跳转链接带 ?bib=1，与正文引用区分（正文正则不含 ?，天然隔离）
       const jump = this.settings.linkEnabled
-        ? " [↗](zotero://select/library/items/" + k + "?bib=1)"
+        ? " [↗](zotero://select/library/items/" + r.k + "?bib=1)"
         : "";
       // ⚠️ 用纯段落，不用 "- " 列表：列表会渲染出项目符号（看起来像编号），
       //    且条目以 "[1]" 开头时思源会误认成任务列表。

@@ -25,7 +25,14 @@ NOTES = []      # 各用例期间冒出来的界面提示
 NB = None
 KEYS = []          # 真实文献 [{k,t,y,a}]
 ORIG_STYLE = None
-CHAIR = "http://www.zotero.org/styles/syau-thesis沈阳农业大学硕博论文"
+CHAIR = "http://www.zotero.org/styles/syau-thesis"  # 启动时换成「本机真能 get 到」的那个（见 setup）
+CHAIR_CANDIDATES = [
+    # 同一个沈农样式在两台机上 ID 不同：单位机那份 .csl 的 <id> 带中文后缀，
+    # 家机这份是官方 ID。Zotero.Styles.getVisible() 会把「文件在 styles 目录里、
+    # 但没注册进样式库」的也算进来，所以不能只看可见列表，必须用 Styles.get 试。
+    "http://www.zotero.org/styles/syau-thesis沈阳农业大学硕博论文",
+    "http://www.zotero.org/styles/syau-thesis",
+]
 APA = "http://www.zotero.org/styles/apa"
 IEEE = "http://www.zotero.org/styles/ieee"
 FAKE = "FAKEKEY99"  # 库里必然不存在的 key
@@ -97,7 +104,7 @@ def doc_of(title, md):
 # ---------------------------------------------------------------- 启动准备
 
 def setup():
-    global NB, KEYS, ORIG_STYLE
+    global NB, KEYS, ORIG_STYLE, CHAIR
     NB = L.make_notebook("main")
     ORIG_STYLE = L.get_style()
     code = ('const lib = Zotero.Libraries.userLibraryID;\n'
@@ -105,7 +112,7 @@ def setup():
             's.addCondition("itemType", "isNot", "note");\n'
             's.addCondition("itemType", "isNot", "attachment");\n'
             'const ids = await s.search();\n'
-            'const items = await Zotero.Items.getAsync(ids.slice(0, 40));\n'
+            'const items = await Zotero.Items.getAsync(ids.slice(0, 240));\n'
             'return JSON.stringify(items.map(function (i) { return {\n'
             '  k: i.key, t: String(i.getField("title") || "").slice(0, 60),\n'
             '  y: String(i.getField("date") || "").slice(0, 4),\n'
@@ -117,9 +124,24 @@ def setup():
             KEYS = json.loads(KEYS)
         else:
             break
+    # 只要「有作者 + 年份是四位数」的常规文献。
+    # 无作者的网页条目（比如学校教务处通知）会被 APA 渲染成 `(*标题*, 不详)`，
+    # 这种文本里含斜体与括号，正文引用每轮重排都会漂移一次 —— 那是另一个待修的问题，
+    # 不该让它污染这一整套用例。取 240 条再筛，保证筛完仍有 40 条够 t30 用。
+    clean = [x for x in KEYS
+             if (x.get("a") or "").strip() and (x.get("y") or "").isdigit()]
+    if len(clean) >= 40:
+        KEYS = clean[:40]
     print("笔记本 %s；原文样式 %s" % (NB, ORIG_STYLE))
     print("取到 %d 条真实文献，前 3 条：%s\n" % (
         len(KEYS), " | ".join("%s(%s)" % (x["k"], x["y"]) for x in KEYS[:3])))
+    alive = L.zot('const ids = %s;\n'
+                  'return JSON.stringify(ids.filter(function (id) { return !!Zotero.Styles.get(id); }));'
+                  % json.dumps(CHAIR_CANDIDATES, ensure_ascii=False))
+    while isinstance(alive, str):
+        alive = json.loads(alive)
+    CHAIR = alive[0] if alive else APA
+    print("测试用样式：%s\n" % CHAIR)
     L.set_style(CHAIR)
 
 
@@ -760,6 +782,148 @@ def t30_一百条文献():
     L.rm_doc(d)
 
 
+@case
+def t31_快照里的旧编号被剥掉():
+    """
+    2026-11-04 用户实测（文档 20261103202849-fve8nmv）：换 Zotero profile 后某条 key
+    失效，文末表 7 条里 6 条是 APA 无编号、唯独它带着 `(1)` —— 因为快照里存的是当初
+    用顺序编码制样式渲染出来的、自带编号的原文。
+
+    期望：整表形态一致。当前样式是作者年式时，从快照回落的那条也必须把旧编号剥掉；
+    正文照样保留（不能为了一条编号就把整条降级成占位符）。
+    """
+    k1 = KEYS[0]["k"]
+    d = doc_of("旧编号", "甲%s。\n" % L.cite("a", [k1]))
+    ok(L.reflow(d)["ok"], "首轮失败")
+    old = L.get_style()
+    try:
+        L.set_style(APA)
+        s = L.snap(d)
+        s["items"][FAKE] = {
+            "csl": {"id": 1, "type": "article-journal", "title": "已删条目"},
+            "bib": '<div class="csl-entry">(1) 已删条目兜底原文. 2099.</div>',
+        }
+        s["clusters"]["%s|%s" % (k1, FAKE)] = {"c": "(Case et al., 2012; 兜底 2099)", "np": []}
+        L.set_attrs(d, {L.SNAP_ATTR: L.snap_encode(s)})
+        ch = L.doc_children(d)
+        L.api("/api/block/updateBlock", {
+            "id": ch[0]["id"], "dataType": "markdown",
+            "data": "甲%s%s。" % (L.cite("a", [k1]), L.cite("b", [FAKE]))})
+        time.sleep(0.8)
+        r = L.reflow(d)
+        ok(r["ok"], "重排失败：%s" % r.get("err"))
+        eq(r["r"]["missing"], 1, "应报告 1 条取不到")
+        texts = [c.get("content") or "" for c in L.bib_entries(d)]
+        eq(len(texts), 2, "文末应有 2 条")
+        fb = [x for x in texts if "兜底原文" in x]
+        eq(len(fb), 1, "缺条处应保留快照原文，实际：%s" % texts)
+        # 核心断言：作者年式的列表里，一条都不许带编号前缀
+        for x in texts:
+            ok(not re.match(r"^\s*(?:\(\d+\)|\[\d+\]|\d{1,3}\.)", x),
+               "文末条目不应当带编号（混排）：%r" % x)
+    finally:
+        L.set_style(old)
+    L.rm_doc(d)
+
+
+@case
+def t32_换库后缺条文献表不乱序():
+    """
+    2026-11-04 用户实测（文档 20261103202849-fve8nmv，切换 Zotero profile 到另一个数据目录）：
+    7 条引用里 6 条在当前库里查不到，只能靠快照原文顶上。旧代码把缺条的 key 一律
+    追加到末尾，作者年式文献表就从字母序变成「实时的在前、缺的在后」——
+    当时「许育新」那条唯一的实时条目被顶到了第一位。
+
+    期望：作者年式按条目正文排序，缺条也回到字母序该在的位置；并把顺序记进快照，
+    下次（数字式那种无法自行计算的样式）才有得复原。
+    """
+    # 挑一条「有作者、年份是四位数」的常规文献：无作者的网页条目会被 APA 渲染成
+    # `(*标题*, 不详)`，那属于另一个待修的问题（正文引用每轮漂移），别混进来。
+    k1 = next((x["k"] for x in KEYS
+               if (x.get("a") or "").strip() and (x.get("y") or "").isdigit()),
+              KEYS[1]["k"])
+    FZ, FA = "FAKEZULU01", "FAKEALPHA02"
+    d = doc_of("换库顺序", "甲%s。尾。\n\n乙%s。尾。\n\n丙%s。尾。"
+               % (L.cite("a", [k1]), L.cite("b", [FZ]), L.cite("c", [FA])))
+    ok(L.reflow(d)["ok"], "首轮失败")
+    old = L.get_style()
+    try:
+        L.set_style(APA)
+        s = L.snap(d)
+        s["items"][FZ] = {
+            "csl": {"id": 900001, "type": "article-journal", "title": "Zulu 的文献"},
+            "bib": '<div class="csl-entry">Zulu, A. 2100. 换库顺序测试甲.</div>',
+        }
+        s["items"][FA] = {
+            "csl": {"id": 900002, "type": "article-journal", "title": "Alpha 的文献"},
+            "bib": '<div class="csl-entry">Alpha, B. 2100. 换库顺序测试乙.</div>',
+        }
+        L.set_attrs(d, {L.SNAP_ATTR: L.snap_encode(s)})
+        r = L.reflow(d)
+        ok(r["ok"], "缺条重排不应抛异常：%s" % r.get("err"))
+        eq(r["r"]["missing"], 2, "应报告 2 条取不到")
+        md = L.bib_md(d)
+        ok("Alpha" in md and "Zulu" in md, "缺条应补回快照原文，实际文末：%s" % md[:400])
+        ok(md.index("Alpha") < md.index("Zulu"),
+           "作者年式文献表必须按字母序，缺条不能顶到前面：%s" % md[:400])
+        s2 = L.snap(d)
+        ok(s2.get("bibOrder"), "重排后快照应记下文献表顺序，否则下次换库无从复原")
+        eq(len(s2["bibOrder"]), 3, "顺序应记全 3 条，实际 %s" % (s2.get("bibOrder"),))
+        r2 = L.reflow(d)
+        if r2["r"]["updated"]:
+            for c in L.doc_children(d):
+                print("         DEBUG", c["type"], c["id"], repr(L.kd(c["id"])))
+        eq(r2["r"]["updated"], 0, "二次重排应幂等")
+        eq(L.bib_md(d), md, "二次重排后文献表不应变化")
+    finally:
+        L.set_style(old)
+    L.rm_doc(d)
+
+
+@case
+def t33_网页类无作者条目不再每轮漂移():
+    """
+    2026-11-04 用户实测：库里排在最前面的「课程建设（校级）-教务处」是网页条目
+    （无作者、无年份），APA 把它渲染成 `(*标题*, 不详)`。这个斜体星号落进
+    `[…](zotero://…)` 的链接文本后，思源会把它拆成三段链接：
+        [(](…)​*[标题](…)​*[, 不详)](…)
+    下一轮扫描就把这一处当成 3 条独立引用，每重排一次再拆一次，永远不收敛。
+
+    期望：正文引用里不出现强调标记，链接保持单段，第二轮起零写入。
+    """
+    code = ('const lib = Zotero.Libraries.userLibraryID;\n'
+            'const s = new Zotero.Search(); s.libraryID = lib;\n'
+            's.addCondition("itemType", "is", "webpage");\n'
+            'const ids = await s.search();\n'
+            'const its = await Zotero.Items.getAsync(ids.slice(0, 40));\n'
+            'const hit = its.filter(function (i) { return (i.getCreators() || []).length === 0; })[0];\n'
+            'return JSON.stringify(hit ? hit.key : "");')
+    k = L.zot(code)
+    # zot 的返回值可能被 JSON.stringify 包了 1~2 层；空 key 时会退化成 '""'，
+    # 不能无脑 while，否则对空串反复 json.loads 直接抛异常。
+    for _ in range(3):
+        if isinstance(k, str) and k[:1] in ('"', '['):
+            k = json.loads(k)
+        else:
+            break
+    if not k:
+        print("         库里没有无作者的网页条目，跳过")
+        return
+    d = doc_of("网页条目", "甲 %s 乙。\n" % L.cite("占位", [k]))
+    r1 = L.reflow(d)
+    ok(r1["ok"], "首轮失败：%s" % r1.get("err"))
+    kd = L.kd(L.doc_children(d)[0]["id"])
+    eq(kd.count("zotero://select"), 1,
+       "一处引用只能有一个链接，被拆成多段就是嵌套强调导致的：%r" % kd[:220])
+    ok("*" not in kd.split("\n{:")[0], "正文引用里不应残留强调星号：%r" % kd[:220])
+    md1 = L.body_md(d)
+    for i in (2, 3):
+        r = L.reflow(d)
+        eq(r["r"]["updated"], 0, "第 %d 轮不应再改写正文（漂移）" % i)
+        eq(L.body_md(d), md1, "第 %d 轮后正文应逐字一致" % i)
+    L.rm_doc(d)
+
+
 # ---------------------------------------------------------------- 主流程
 
 ALL = [t01_空文档不报错, t02_单条引用正常改写, t03_连续重排幂等, t04_相邻引用合并为一处,
@@ -771,7 +935,8 @@ ALL = [t01_空文档不报错, t02_单条引用正常改写, t03_连续重排幂
        t19_并发重排串行化, t20_撤销能回到上一步, t21_不生成文末标题, t22_自定义编号模板,
        t23_属性在关闭重开笔记本后仍完好, t24_关掉链接后不破坏已有引用, t25_文档属性被清空后能重建,
        t26_命令面板失败有可见提示, t27_列表表格标题里的引用, t28_缺条同时插入新文献,
-       t29_复杂文档连跑十轮不漂移, t30_一百条文献]
+       t29_复杂文档连跑十轮不漂移, t30_一百条文献, t31_快照里的旧编号被剥掉,
+       t32_换库后缺条文献表不乱序, t33_网页类无作者条目不再每轮漂移]
 
 
 def main():
