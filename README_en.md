@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.34
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.35
 
 **English** | [简体中文](./README.md)
 
@@ -49,8 +49,8 @@ Based only on each plugin's public documentation. **Not tested side by side** �
 | 4.2 Literature notes required first | No | Yes — citations point at note documents in a library | No — metadata lives in a native database |
 | 4.3 Rendering | Handed to Zotero's CSL engine; body and bibliography share one source | Anchor text generated from templates, several styles | Mostly "export a citation string"; you paste it into the body |
 | 4.4 Bibliography | Generated and re-rendered with the style | Depends on the literature-note library structure | Export only; no bibliography maintenance |
-| 4.5 Data source | Zotero 10 + Debug Bridge | BibTeX / CSL-JSON / Better BibTeX / Debug Bridge / Web API | Zotero Connector intake + local PDF metadata extraction |
-| 4.6 Setup cost | Zotero + Debug Bridge required | Can work from local BibTeX alone | Zotero optional; PDF metadata resolved online |
+| 4.5 Data source | Zotero 10 + ZBridge | BibTeX / CSL-JSON / Better BibTeX / Debug Bridge / Web API | Zotero Connector intake + local PDF metadata extraction |
+| 4.6 Setup cost | Zotero + ZBridge required | Can work from local BibTeX alone | Zotero optional; PDF metadata resolved online |
 | 4.7 Best for | Zotero users who need submission-grade formatting | People building a literature-note library inside SiYuan | People who want a paper library plus PDF translation |
 
 Short version: **if your references already live in Zotero and you only need the text and bibliography to be right**, this plugin is the least work; **if you want literature cards inside SiYuan and Word/LaTeX export**, those two fit better.
@@ -61,24 +61,26 @@ Short version: **if your references already live in Zotero and you only need the
 
 | Requirement | Version | Note |
 |---|---|---|
-| Zotero | **10** | The plugin runs code inside Zotero through the Debug Bridge; it never reads the database file |
-| Zotero Debug Bridge | **1.2** | Zotero add-on exposing `127.0.0.1:23119/debug-bridge/execute` |
+| Zotero | **10** | The plugin runs code inside Zotero through ZBridge; it never reads the database file |
+| ZBridge | **10.1.5 or newer** | Zotero add-on (Zotero 7.0+), exposing `127.0.0.1:23119/zbridge/execute` plus the legacy-compatible `/debug-bridge/execute` |
 | SiYuan | 3.1.0+ | Desktop only (`frontends: desktop`) |
 
-Without the Debug Bridge nothing listens on that endpoint and every request fails.
+Without ZBridge nothing listens on that endpoint and every request fails. ZBridge implements the entire original Zotero Debug Bridge API, so **you do not need Debug Bridge any more**; running both side by side also works.
+
+Download: <https://github.com/taotaochen86/zbridge/releases/latest>
 
 ### 5.2 First-time setup
 
-1. Download the Debug Bridge **1.2** xpi (not an older build)
-2. Zotero → Tools → Plugins, then **drag the xpi into the window**
+1. Download the latest ZBridge xpi: <https://github.com/taotaochen86/zbridge/releases/latest>
+2. Zotero → Tools → Plugins → gear icon (top right) → Install Add-on From File…, pick the xpi
 3. Restart Zotero
 4. Zotero → Tools → Developer → Run JavaScript:
 
    ```js
-   Zotero.Prefs.set("extensions.zotero.debug-bridge.token", "CTT", true);
+   Zotero.Prefs.set("extensions.zotero.zbridge.token", "your-token", true);
    ```
 
-   Replace `"CTT"` with your own token
+   Replace `"your-token"` with your own token (any 32-character random string)
 5. SiYuan → Settings → Bazaar → Downloaded → Plugins → Zotero Cite → Settings, paste the same token into "Access token"
 6. Click "Test connection"; `Connected: Zotero 10.x, library ID 1` means you are done
 
@@ -88,7 +90,7 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 
 | Item | Default | Note |
 |---|---|---|
-| Bridge URL | `http://127.0.0.1:23119/debug-bridge/execute` | Rarely needs changing |
+| Bridge URL | `http://127.0.0.1:23119/zbridge/execute` | Rarely needs changing; the token is appended to the query automatically. Setups still holding the old `/debug-bridge/execute` address are migrated on upgrade |
 | Access token | empty | The token from step 4 in 5.2 |
 | Default citation form | Default (CSL) | Affects new citations only; existing ones follow their own `?f=` |
 | CSL style | current style | You can paste a style URL directly. A fresh install defaults to APA, which ships with every Zotero |
@@ -254,7 +256,7 @@ Three limits on this path:
 
 ## 8 Limitations
 
-1. **Hard dependency on Zotero + Debug Bridge** — without it the plugin does nothing; it is not self-contained
+1. **Hard dependency on Zotero + ZBridge** — without it the plugin does nothing; it is not self-contained
 2. **Zotero only** — EndNote, Mendeley, NoteExpress and direct PubMed lookup are not supported
 3. **Desktop only** — it needs the local port 23119, so the web and mobile clients cannot use it
 4. **Bibliography entries are owned by the plugin** — every entry carries a `custom-zotero-bib` block attribute and a re-render only replaces those marked blocks. Do not edit that attribute by hand, and do not expect entries moved elsewhere to still be recognised. Rebuilds are inserted back in place, between the previous and next entry, so an acknowledgement or appendix written after the list is not swallowed into it; if every old entry is gone and there is no neighbour to anchor to, the new list can only be appended at the end of the document
@@ -262,7 +264,7 @@ Three limits on this path:
 6. **Undo is a separate stack** — `Ctrl+Z` only covers inserting; re-rendering and style switches need the plugin's own undo command
 7. **Narrative form is author-date only** — IEEE and GB/T numeric styles have no such concept
 8. **Bibliography numbering follows the CSL style by default** — numeric styles produce `[1]` / `1.` (a leading `1. ` is written in escaped form so markdown does not turn it into an ordered list); author-date styles have none. You can switch to "no numbering" or a custom template (`{n}` = sequence) in settings. Check your journal's requirement before submission
-9. **Reconfiguration on a new machine** — Debug Bridge and the token must be reinstalled and re-entered
+9. **Reconfiguration on a new machine** — ZBridge and the token must be reinstalled and re-entered
 10. **Performance degrades with document size** — a long document with many citations re-renders block by block and visibly pauses. **Recommended ceiling: keep one document under 100,000 characters and fewer than 300 citations**
 11. **The snapshot is a fallback, not a backup** — `custom-zotero-bibsnap` only keeps the fields needed for rendering, so it keeps old documents looking right but cannot push items back into Zotero, and it cannot restore abstracts, notes or PDFs. After switching libraries, "Relink in library" only helps for items that **already exist in the current library** (unique DOI / title match); if the paper is not there at all, nothing can help. Real recovery still means re-importing from a backup or library
 12. **Snapshot numbering is last time's** — with numeric styles `[n]` is assigned by CSL in document order, so a restored entry carries the previous number and may not match the current sequence; documents that never rendered successfully have no snapshot at all
@@ -274,7 +276,7 @@ Three limits on this path:
 
 | Step | Approach |
 |---|---|
-| Talking to Zotero | Talks to `http://127.0.0.1:23119/debug-bridge/execute` directly, running a small piece of JS inside Zotero to fetch item metadata, installed CSL styles and the rendered citation string. No helper process, no proxy service |
+| Talking to Zotero | Talks to `http://127.0.0.1:23119/zbridge/execute?token=…` (ZBridge native endpoint; the legacy `/debug-bridge/execute` path still works via the Bearer header) directly, running a small piece of JS inside Zotero to fetch item metadata, installed CSL styles and the rendered citation string. No helper process, no proxy service |
 | What a citation is | An ordinary markdown link `[(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)`. The link is the source of order and the form marker on re-render (see 7.4), with a document-level snapshot as fallback (see 7.5) |
 | Citation text | Rendered by the CSL style installed in Zotero; in-text and bibliography strings come from the same source and are re-rendered together when the style changes |
 | Bibliography | Entries are recognised by a `custom-zotero-bib` block attribute (old documents fall back to matching the heading text) and only those marked blocks are replaced; new entries are inserted back in place between the previous and next one, and marked by anchor; the heading is auto-generated, customised, or omitted entirely per settings; entry links carry `?bib=1` and are skipped on re-render, so deleted references never come back |
@@ -309,6 +311,7 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.35 | 2026-11-06 | **Fully switched to ZBridge**: the plugin no longer depends on the Zotero Debug Bridge. (1) The default bridge URL is now ZBridge's native endpoint `http://127.0.0.1:23119/zbridge/execute`, with the token appended to the query automatically; a stored `/debug-bridge/execute` value is migrated once on upgrade (a hand-edited URL is left alone). (2) The bazaar card description, the dependency block in the settings panel, and the connection-failure / 401 messages all point at ZBridge (<https://github.com/taotaochen86/zbridge/releases/latest>) and `extensions.zotero.zbridge.token`. (3) Both READMEs rewrite the requirements table, setup steps, settings notes, limitations and architecture table, and the old illustrated Debug Bridge page is replaced by the ZBridge download page. The protocol is unchanged (raw JS in, JSON out), so an installed Debug Bridge can simply be removed |
 | 1.2.34 | 2026-11-04 | **Surviving a switch of Zotero library (profile / data directory)**: the edit-citation dialog no longer shows a screenful of "(item no longer in library)" — titles, authors and years come from the document's citation snapshot, tagged "not in current library · from document snapshot"; a new "Relink in library" matches by DOI (title as fallback) and repoints stale keys at the same item in the current library; switching the default form / narrative, refreshing the document and saving after an edit all absorb `no-items` and continue from the snapshot instead of failing. Item lookups now span every library, group libraries included. **Fixed whitespace being eaten around citations**: collapsing legacy duplicate markup matched the surrounding blanks too, so every re-render deleted one space and the text drifted to `TN[(Case et al. 2012)`; non-duplicate matches are now returned untouched, and blocks are no longer rewritten needlessly. **Fixed mixed numbering in the bibliography**: an entry missing from the current library is now restored from the snapshot text (it used to be replaced by a "(item no longer in Zotero)" placeholder, losing both the text and its number), and a final pass normalises the numbering form based on the live-rendered entries, so a leftover `(1)` from an older numeric style can no longer sit inside an unnumbered author-date list. **Fixed bibliography order after a library switch**: missing keys used to be appended to the end, turning an author-date list from alphabetical into "live first, missing last" (measured: 6 of 7 missing, the entry originally 4th pushed to the top); author-date now sorts by each entry's own text (one correct answer, and it heals tables broken earlier), numeric restores from the newly stored `bibOrder`. **Fixed web-entry citations drifting on every render**: authorless, yearless web entries render as `(*Title*, n.d.)`, and that asterisk made SiYuan split the link into three segments, so one citation became three and re-split on every pass; emphasis markers are now stripped from body citation text and the link stays a single segment (bibliography entries keep their italics) |
 | 1.2.33 | 2026-11-04 | **Citation snapshot**: the trimmed CSL data and last rendered text of every reference are stored in the document attribute `custom-zotero-bibsnap`, so an item missing from Zotero is restored from the previous text and named in the notification (no more silent empty text / dropped reference in a merged citation / empty `↗` row). The bibliography is now rebuilt in place, so an appendix written after the list is no longer swallowed into it. Re-rendering no longer throws `tree not found` toasts; citations inside lists, tables and headings stop being rewritten on every run; a just-inserted citation no longer stays unrendered; command-palette failures are reported. Added a 30-case automated test suite (idempotency / snapshot / missing item / undo / concurrency / 100-reference scale) |
 | 1.2.32 | 2026-11-04 | Default style pinned to APA, which ships with every Zotero install, so first use can no longer fail on a missing style; a style missing on this machine now refuses to refresh (instead of silently swapping in another style) and the settings panel shows a red warning plus a one-click "use the built-in APA" button |

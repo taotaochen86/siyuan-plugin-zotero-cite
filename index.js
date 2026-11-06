@@ -1,12 +1,13 @@
 /**
  * Zotero Cite for SiYuan
  * ------------------------------------------------------------------
- * 通过 Zotero debug bridge（默认 http://127.0.0.1:23119/debug-bridge/execute）
- * 在思源里插入文献引用。
+ * 通过 ZBridge（默认 http://127.0.0.1:23119/zbridge/execute）在思源里插入文献引用。
+ * ZBridge 是 Zotero Debug Bridge 的替代扩展，同时提供 /zbridge/execute 与
+ * 原版兼容端点 /debug-bridge/execute；老配置里的旧地址会被一次性迁到新默认值。
  *
  * 架构要点（实测依据，勿随意改动）：
  *   1. 思源渲染进程 fetch 127.0.0.1:23119 是通的，6ms 级，不需要任何中转。
- *   2. debug-bridge 的 body 是「裸 JS」，不能包成 JSON（会 SyntaxError）。
+ *   2. 端点的 body 是「裸 JS」，不能包成 JSON（会 SyntaxError）。
  *   3. 请求头必须是 Content-Type: text/plain + Authorization: Bearer <token>。
  *   4. CSL 渲染全部放在 Zotero 侧完成（citeproc），插件只负责搬运与排版，
  *      这样任意 CSL 样式都能用，插件里不打包 citeproc。
@@ -53,7 +54,10 @@ async function apiQuiet(path, payload) {
 const BIB_ATTR = "custom-zotero-bib";
 
 const DEFAULT_SETTINGS = {
-  bridgeUrl: "http://127.0.0.1:23119/debug-bridge/execute",
+  // ZBridge 原生端点。令牌走 query（?token=），不接受 Bearer；
+  // 老地址 http://127.0.0.1:23119/debug-bridge/execute 是 ZBridge 的原版兼容端点，
+  // 仍能连通，但默认值统一到新端点。
+  bridgeUrl: "http://127.0.0.1:23119/zbridge/execute",
   token: "",
   // 默认样式只用「Zotero 全新安装就自带」的样式，绝不指向需要另下载的 csl。
   //   Zotero 7 的预置样式打在安装包 omni.ja 的 styles/ 里，共 15 个：
@@ -85,12 +89,16 @@ const DEFAULT_SETTINGS = {
 /* ============================ 依赖与图标 ============================ */
 
 /**
- * 本插件不是纯前端工具，它依赖 Zotero 侧的一个扩展：Zotero Debug Bridge。
+ * 本插件不是纯前端工具，它依赖 Zotero 侧的一个扩展：ZBridge
+ * （Zotero Debug Bridge 的替代品，保留 /debug-bridge/execute 兼容端点）。
  * 没有它，任何请求都会 404 / 连接被拒，用户看到的是"连不上 Zotero"，
  * 光看报错根本猜不到要装扩展，所以所有失败提示都必须把这份说明指出来。
  */
-const DEP_NAME = "Zotero Debug Bridge";
-const DEP_URL = "https://ttchen.cn42.ug.link/web/20260915211141-favpvyz-site/20260915211232-qh8ikcb.html";
+const DEP_NAME = "ZBridge";
+const DEP_URL = "https://github.com/taotaochen86/zbridge/releases/latest";
+const DEP_TOKEN_PREF = "extensions.zotero.zbridge.token";
+/** 老默认地址（原版 Debug Bridge 端点，ZBridge 也保留为兼容端点），仅用于一次性迁移 */
+const LEGACY_BRIDGE_URL = "http://127.0.0.1:23119/debug-bridge/execute";
 
 /**
  * 顶栏图标（32 栅格，画在 2 单位整数栅格上 —— 思源顶栏只显示 16px，
@@ -167,7 +175,7 @@ function pickSettings(obj) {
  *    Zotero.API.parseParams 按逗号拆开；路径里的 :objectKey 会整串当成一个 key 去查，
  *    经 Windows 协议分发后实测会把 Zotero 拖到无响应。
  *    所以路径只放第一个 key（保证被系统直接打开时也是合法单条），
- *    其余 key 放 ?zkeys=，由插件解析后走 debug bridge 多选。
+ *    其余 key 放 ?zkeys=，由插件解析后走 ZBridge 多选。
  */
 const CITE_RE = /\[((?:\\.|[^\[\]\\])*)\]\(zotero:\/\/select\/library\/items\/([A-Za-z0-9]+(?:,[A-Za-z0-9]+)*)(?:\?([^)\s]*))?\)/g;
 
@@ -221,11 +229,25 @@ function parseCiteKeys(href) {
 /* ============================ Zotero 桥 ============================ */
 
 /**
+ * 实际请求地址。
+ *   ZBridge 原生端点 /zbridge/execute 只认 query 里的 token（Bearer 会被忽略），
+ *   所以这里把设置里的令牌补进 query；用户自己填了 ?token= 就尊重原值。
+ *   原版兼容端点 /debug-bridge/execute 走 Authorization 头，地址原样返回。
+ */
+function bridgeUrlFor(settings) {
+  let url = String(settings.bridgeUrl || DEFAULT_SETTINGS.bridgeUrl).trim() || DEFAULT_SETTINGS.bridgeUrl;
+  if (/\/zbridge\/execute(\?|$)/.test(url) && !/[?&]token=/.test(url)) {
+    url += (url.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(settings.token || "");
+  }
+  return url;
+}
+
+/**
  * 在 Zotero 里执行一段 JS，返回它 JSON.parse 后的结果。
  * code 必须是裸 JS（可用 return）。
  */
 async function zoteroExec(settings, code) {
-  const url = (settings.bridgeUrl || DEFAULT_SETTINGS.bridgeUrl).trim();
+  const url = bridgeUrlFor(settings);
   if (!settings.token) {
     throw new Error("还没填令牌。本插件依赖 Zotero 的「" + DEP_NAME + "」扩展：先装好它，" +
       "用 工具 → 开发者 → Run JavaScript 设置 token，再把 token 填到插件设置里。" +
@@ -248,16 +270,17 @@ async function zoteroExec(settings, code) {
   }
   const txt = await resp.text();
   if (!resp.ok) {
-    // 404 = 端口在（Zotero 起了）但没有这个端点 → 十成是没装扩展
+    // 404 = 端口在（Zotero 起了）但没有这个端点 → 十成是没装 ZBridge
     const hint = resp.status === 404
-      ? " 端口通但没有 debug-bridge 端点，通常是没装「" + DEP_NAME + "」扩展。安装步骤：" + DEP_URL
+      ? " 端口通但没有 zbridge 端点，通常是没装「" + DEP_NAME + "」扩展。下载与安装：" + DEP_URL
       : (resp.status === 401 || resp.status === 403
-        ? " 令牌不对。到 Zotero 设置编辑器核对 extensions.zotero.debug-bridge.token。"
+        ? " 令牌不对。到 Zotero 设置编辑器核对 " + DEP_TOKEN_PREF + "，" +
+          "并确认插件设置里的访问令牌与它一致。"
         : "");
-    throw new Error("Zotero debug bridge 返回 " + resp.status + "：" + String(txt).slice(0, 200) + hint);
+    throw new Error("ZBridge 返回 " + resp.status + "：" + String(txt).slice(0, 200) + hint);
   }
   let v = txt;
-  // debug-bridge 会把返回值再 JSON.stringify 一层，形成「字符串套 JSON」
+  // 兼容端点会把返回值再 JSON.stringify 一层，形成「字符串套 JSON」（原生端点也是单层字符串）
   for (let i = 0; i < 2 && typeof v === "string"; i++) {
     const t = v.trim();
     if (!t.startsWith("{") && !t.startsWith("[") && !t.startsWith("\"")) {
@@ -1118,7 +1141,7 @@ function makeCiteLink(text, keys, settings, fmtId) {
     return label.replace(/\\/g, "");
   }
   // 路径只放第一个 key（单条 URL，任何情况下都能被系统正常打开）；
-  // 多条目时用 ?zkeys= 带上全部 key，由插件解析后走 debug bridge 多选。
+  // 多条目时用 ?zkeys= 带上全部 key，由插件解析后走 ZBridge 多选。
   const qs = [];
   if (list.length > 1) {
     qs.push("zkeys=" + list.join(","));
@@ -1429,6 +1452,13 @@ module.exports = class ZoteroCite extends Plugin {
       this.settings.bibHeading = "auto";
     }
     this.settings.bibHeadingMigrated = true;
+    /*
+     * 桥接地址：默认值从原版 Debug Bridge 端点换成 ZBridge 原生端点。
+     * 老配置里存的正是旧默认值，一次性迁过来；用户自己填过的地址一律不动。
+     */
+    if (String(this.settings.bridgeUrl || "").trim() === LEGACY_BRIDGE_URL) {
+      this.settings.bridgeUrl = DEFAULT_SETTINGS.bridgeUrl;
+    }
     this.curProtyle = null;
     this.styleCache = null;
     this._menuEl = null;
@@ -1674,7 +1704,7 @@ module.exports = class ZoteroCite extends Plugin {
    *    （见 xpcom/api.js → Zotero.API.parseParams），路径里的 :objectKey 会整串
    *    被当成一个 key 去查。查不到还要再走一遍 Windows 协议分发，实测直接把
    *    Zotero 拖到无响应（用户需强杀）。
-   *    所以：多条目一律走 debug bridge 在 Zotero 内部 selectItems()，
+   *    所以：多条目一律走 ZBridge 在 Zotero 内部 selectItems()，
    *    bridge 不通时退回「只打开第一个 key」的单条协议（单条已验证安全）。
    */
   /** 用系统浏览器打开外部链接（设置面板里没有可用的 <a target=_blank> 环境） */
@@ -4068,14 +4098,22 @@ return JSON.stringify({ok: !!s, title: s ? s.title : null});`);
           </div>
           <div class="zc-dep__text">
             本插件不直接读 Zotero 数据库，而是通过这个 Zotero 扩展暴露的本地接口读写条目。
-            没装它，插件只能报「连不上」——端口 23119 上根本没有 <code>debug-bridge</code> 端点。
+            没装它，插件只能报「连不上」——端口 23119 上根本没有
+            <code>/zbridge/execute</code> 端点。
+            ZBridge 是 Zotero Debug Bridge 的替代品，同时提供
+            <code>/zbridge/execute</code> 与原版兼容端点
+            <code>/debug-bridge/execute</code>，装了它就不必再装 Debug Bridge。
           </div>
           <ol class="zc-dep__steps">
-            <li>下载 <code>Debug Bridge 1.2</code> 的 xpi —— 别用更旧的包，版本以说明文档为准</li>
-            <li>Zotero → 工具 → 插件，把 xpi 直接拖进窗口安装，装完重启 Zotero</li>
+            <li>下载最新 <code>zbridge-x.y.z.xpi</code>：
+              <code>${DEP_URL}</code></li>
+            <li>Zotero → 工具 → 插件 → 右上角齿轮 → Install Add-on From File…，
+              选中 xpi，装完重启 Zotero</li>
             <li>Zotero → 工具 → 开发者 → Run JavaScript，执行
-              <code>Zotero.Prefs.set("extensions.zotero.debug-bridge.token","你的令牌",true);</code></li>
+              <code>Zotero.Prefs.set("${DEP_TOKEN_PREF}","你的令牌",true);</code></li>
             <li>把同一个令牌填到下面的「访问令牌」，点「测试连接」确认</li>
+            <li>若以前装过 Zotero Debug Bridge，可在插件列表里卸载它 ——
+              ZBridge 已覆盖它的全部接口，两个同时装也能用</li>
           </ol>
           <div class="zc-dep__row">
             <button class="b3-button b3-button--text b3-button--small zc-depdoc">打开完整安装说明</button>

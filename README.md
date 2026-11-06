@@ -1,4 +1,4 @@
-# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.34
+# Zotero Cite（siyuan-plugin-zotero-cite）v1.2.35
 
 **简体中文** | [English](./README_en.md)
 
@@ -49,8 +49,8 @@
 | 4.2 是否需先建文献笔记 | 不需要 | 需要（引用指向库里的文献笔记文档） | 不需要（用原生数据库存元数据） |
 | 4.3 引用渲染方式 | 交给 Zotero 的 CSL 引擎，正文与文末同源 | 按样式生成锚文本，多种样式可选 | 以「导出引用」为主，正文引用需自行粘贴 |
 | 4.4 文末参考文献表 | 自动生成并随样式重排 | 依赖文献笔记库结构 | 提供导出，不维护文末表 |
-| 4.5 数据来源 | Zotero 10 + Debug Bridge | BibTeX / CSL-JSON / Better BibTeX / Debug Bridge / Web API 五种 | Zotero Connector 接收 + 本地 PDF 识别 |
-| 4.6 依赖门槛 | 必须装 Zotero 与 Debug Bridge | 可只用本地 BibTeX 文件 | 可不装 Zotero，PDF 元数据靠联网识别 |
+| 4.5 数据来源 | Zotero 10 + ZBridge | BibTeX / CSL-JSON / Better BibTeX / Debug Bridge / Web API 五种 | Zotero Connector 接收 + 本地 PDF 识别 |
+| 4.6 依赖门槛 | 必须装 Zotero 与 ZBridge | 可只用本地 BibTeX 文件 | 可不装 Zotero，PDF 元数据靠联网识别 |
 | 4.7 适合谁 | 用 Zotero 管文献、要投稿级排版 | 想在思源里维护整库文献笔记 | 想在思源里当文献库 + 翻译 PDF |
 
 取舍一句话：**文献本来就在 Zotero 里、只要正文和文末排版对**，本插件最省事；**想在思源内部建文献卡片、导出 Word/LaTeX**，那两款更合适。
@@ -61,26 +61,26 @@
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| Zotero | **10** | 插件通过 Zotero 内部的 Debug Bridge 执行代码，不直接读数据库文件 |
-| Zotero Debug Bridge | **1.2** | Zotero 插件，提供 `127.0.0.1:23119/debug-bridge/execute` 接口 |
+| Zotero | **10** | 插件通过 Zotero 内部的 ZBridge 执行代码，不直接读数据库文件 |
+| ZBridge | **10.1.5 或更新** | Zotero 插件（Zotero 7.0+ 通用），提供 `127.0.0.1:23119/zbridge/execute` 与原版兼容端点 `/debug-bridge/execute` |
 | 思源笔记 | 3.1.0+ | 仅桌面端（`frontends: desktop`） |
 
-没装 Debug Bridge 时，23119 端口上不存在该端点，插件所有请求都会失败。
+没装 ZBridge 时，23119 端口上不存在该端点，插件所有请求都会失败。ZBridge 已覆盖原版 Zotero Debug Bridge 的全部接口，**不必再装 Debug Bridge**；两个同时装也能用。
+
+ZBridge 下载：<https://github.com/taotaochen86/zbridge/releases/latest>
 
 ### 5.2 首次配置
 
-图文步骤见 <https://ttchen.cn42.ug.link/web/20260915211141-favpvyz-site/20260915211232-qh8ikcb.html>。
-
-1. 下载 Debug Bridge **1.2** 的 xpi（别用更旧的包）
-2. Zotero → 工具 → 插件，把 xpi 直接拖进窗口
+1. 下载 ZBridge 最新版 xpi：<https://github.com/taotaochen86/zbridge/releases/latest>
+2. Zotero → 工具 → 插件 → 右上角齿轮 → Install Add-on From File…，选中 xpi
 3. 重启 Zotero
 4. Zotero → 工具 → 开发者 → Run JavaScript，执行：
 
    ```js
-   Zotero.Prefs.set("extensions.zotero.debug-bridge.token", "CTT", true);
+   Zotero.Prefs.set("extensions.zotero.zbridge.token", "你的令牌", true);
    ```
 
-   `"CTT"` 换成你自己的令牌
+   `"你的令牌"` 换成你自己的令牌（随便一串 32 位字串即可）
 5. 思源 → 设置 → 集市 → 已下载 → 插件 → Zotero 引用 → 设置，把同一令牌填进「访问令牌」
 6. 点「测试连接」，看到 `连接正常：Zotero 10.x，库 ID 1` 即通
 
@@ -90,7 +90,7 @@
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| Bridge 地址 | `http://127.0.0.1:23119/debug-bridge/execute` | 一般不用改 |
+| Bridge 地址 | `http://127.0.0.1:23119/zbridge/execute` | 一般不用改；令牌由插件自动拼进 query（`?token=…`）。老版本留下的原版地址 `.../debug-bridge/execute` 会在升级时自动迁到新默认值 |
 | 访问令牌 | 空 | 5.2 第 4 步设置的 token |
 | 默认引用形态 | 文献引用默认格式 | 只影响新插入的引用；已有引用按自己链接里的 `?f=` 走 |
 | CSL 样式 | 当前使用样式 | 可手填样式 URL。新装默认为 Zotero 自带、任何一台机都有的 APA |
@@ -256,7 +256,7 @@ Zotero 的 item key 只在「同一个库」里唯一。换 profile、把文献�
 
 ## 8 现有不足
 
-1. **强依赖 Zotero + Debug Bridge**：没装就完全不能用，不是自包含工具
+1. **强依赖 Zotero + ZBridge**：没装就完全不能用，不是自包含工具
 2. **只支持 Zotero**：EndNote、Mendeley、NoteExpress、PubMed 直连都不支持
 3. **仅桌面端**：依赖本机 23119 端口，网页版 / 移动端用不了
 4. **文末条目由插件接管**：每条文献带一个 `custom-zotero-bib` 块属性，重排时只替换这些标记块。别手动改这些条目的属性，也别指望把条目挪到别处还能被认出来。重建时按旧条目的前后邻居原位插回，表后面的致谢、附录不会被卷进去；但旧条目已全部删光、又没有邻居可参照时，新表只能追加到文档末尾
@@ -264,7 +264,7 @@ Zotero 的 item key 只在「同一个库」里唯一。换 profile、把文献�
 6. **撤销是独立栈**：`Ctrl+Z` 只能撤「插入」这一步，重排与样式切换必须用插件自己的撤销命令
 7. **叙述式仅限作者年样式**：IEEE、GB/T 顺序编码这类数字样式没有叙述式概念
 8. **文末编号默认跟随 CSL 样式**：数字式样式会带 `[1]` / `1.`（`1. ` 会写成转义形式防止被当成有序列表），作者年样式本来就没有编号。设置里可改为「不显示编号」或自定义模板（`{n}` 为序号占位）。投稿前请按期刊要求核对
-9. **换机需重配**：Debug Bridge 与 token 都要重装重填
+9. **换机需重配**：ZBridge 与 token 都要重装重填
 10. **性能随文档规模下降**：引文很多的长文档，一次重排逐块读写，会明显停顿。**建议单篇文档不超过 10 万字、引用不超过 300 条**
 11. **快照能兜底、不能补回**：`custom-zotero-bibsnap` 只保存渲染所需的精简字段，能保证旧文档文字不变样，但没法据此把文献一键补回 Zotero，也补不出摘要、笔记、PDF。换了 Zotero 库之后，「在库里找回」只对**库里已有的同一条目**有效（按 DOI / 标题唯一命中），库里根本没有这篇时它帮不上忙。要真恢复还是得从备份或文献库重新导入
 12. **快照的编号是「上次的」**：数字式样式里 `[n]` 由 CSL 按全篇顺序分配，缺条时写回的是上次渲染的文本，编号可能与当前顺序不一致；从没成功重排过的文档则完全没有快照可兜
@@ -276,7 +276,7 @@ Zotero 的 item key 只在「同一个库」里唯一。换 profile、把文献�
 
 | 环节 | 做法 |
 |---|---|
-| 与 Zotero 通信 | 直连本机 `http://127.0.0.1:23119/debug-bridge/execute`，把一小段 JS 送进 Zotero 执行，取回条目元数据、已装 CSL 样式、渲染好的引文串。没有中间进程，也没有中转服务 |
+| 与 Zotero 通信 | 直连本机 `http://127.0.0.1:23119/zbridge/execute?token=…`（ZBridge 原生端点；老地址 `/debug-bridge/execute` 也仍兼容，走 Bearer 头），把一小段 JS 送进 Zotero 执行，取回条目元数据、已装 CSL 样式、渲染好的引文串。没有中间进程，也没有中转服务 |
 | 引用落地形态 | 一条普通 markdown 链接 `[(Bordoloi et al., 2019)](zotero://select/library/items/UAPYI8NA?f=csl)`。链接是重排时的顺序来源与形态标记（详见 7.4），另有一份文档级快照兜底（详见 7.5） |
 | 正文渲染 | 交给 Zotero 里已装的 CSL 样式渲染，正文串与文末串同源；换样式时两处一起重排 |
 | 文末列表 | 靠块属性 `custom-zotero-bib` 认出条目（老文档退回标题文字匹配），重排时只替换这些标记块；按旧条目的前后邻居原位插回，标记也按锚点取；标题按设置自动生成、自定义或完全不生成；条目链接带 `?bib=1`，重排时跳过，已删文献不会复活 |
@@ -311,6 +311,7 @@ MIT License © 2026 ttChen
 
 | 版本 | 日期 | 主要变化 |
 |---|---|---|
+| 1.2.35 | 2026-11-06 | **彻底换成 ZBridge**：插件不再依赖 Zotero Debug Bridge。① 桥接地址默认值改成 ZBridge 原生端点 `http://127.0.0.1:23119/zbridge/execute`，令牌由插件自动拼进 query，老配置里残留的 `/debug-bridge/execute` 在升级时一次性迁到新值（用户手填过的地址不动）；② 插件卡片描述、设置面板依赖块、连接失败与 401 报错全部指向 ZBridge（<https://github.com/taotaochen86/zbridge/releases/latest>）与 `extensions.zotero.zbridge.token`；③ README 中英两版的依赖表、安装步骤、设置说明、局限与架构表同步改写，装 Debug Bridge 的旧图文链接换成 ZBridge 下载页。协议未变（都是裸 JS in / JSON out），已装 Debug Bridge 的可直接卸载 |
 | 1.2.34 | 2026-11-04 | **换 Zotero 库（profile / 数据目录）后的兼容**：编辑引用对话框不再把整屏写成「(该条目已不在库里)」，改为从文档里的引用快照取标题/作者/年份，并标「当前库查不到 · 取自文档存档」；新增「在库里找回」，按 DOI（其次标题）把旧 key 接到当前库的同一条目上；切换默认格式 / 叙述式、刷新本篇、保存后重排都接受 `no-items`，改用存档原文继续，不再一按就报错。取条目改为遍历所有库（含群组库）。**修掉引用两侧空格被吃掉**：合并历史残留标记时把链接前后的空白也一起匹配了，每重排一次就删一处，正文会变成 `TN[(Case et al. 2012)`；现在非重复的一律原样保留，重排也不再因此反复重写块。**修掉文末表编号混排**：某条在当前库查不到时改用存档原文补全（以前直接写成「(文献已不在 Zotero 库中)」占位符，既丢正文又没编号），并在最后按「实时渲染的那几条」统一编号形态，`(1)` 这种旧样式残留不会再混进无编号的作者年式列表。**修掉换库后文献表乱序**：缺条的 key 以前一律追加到末尾，作者年式表就从字母序变成「实时的在前、缺的在后」（实测 7 条缺 6 条时，原本排第 4 的被顶到第 1）；现在作者年式按条目正文排序（有唯一正确答案，还能自愈历史上排坏过的表），数字式按存档里新记的 `bibOrder` 复原。**修掉网页类条目每轮漂移**：无作者、无年份的网页条目被 APA 渲染成 `(*标题*, 不详)`，星号让思源把链接拆成三段，一处引用被当成三条、每重排一次再拆一次，永远不收敛；正文引用现在先剥掉强调标记，链接保持单段（文末条目不受影响，斜体照常保留） |
 | 1.2.33 | 2026-11-04 | **引用快照**：每条文献的精简 CSL 与上次渲染的正文/文末文本存进文档属性 `custom-zotero-bibsnap`，Zotero 里取不到时用原文兜底并明确点名（不再有静默空文本 / 合并引用少一条 / 空 `↗` 行）。文献表改为按旧条目原位插回，写在表后的致谢、附录不再被卷进「参考文献」。重排不再弹 `tree not found` 红条；列表、表格、标题里的引用连跑十轮不再重复改写；刚插入的引用不再停在原文；命令面板重排失败有可见提示。新增 30 个用例的自动化测试台（幂等 / 快照 / 缺条兜底 / 撤销 / 并发 / 百条规模） |
 | 1.2.32 | 2026-11-04 | 默认样式锁定 Zotero 新装自带的 APA，不再可能因样式缺失而第一步失败；样式在本机不存在时明确拒绝重排（不再静默换成别的样式覆盖全篇），设置面板红字提示并给出一键改用 APA 的按钮 |
