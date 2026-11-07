@@ -533,20 +533,25 @@ def t19_并发重排串行化():
 @case
 def t20_撤销能回到上一步():
     k = KEYS[0]["k"]
+
+    def strip_ts(md):
+        """块属性里的 updated 是写入时刻，两次采集天然会差 1 秒；比内容不比时钟。"""
+        return re.sub(r'\s*updated="\d+"', "", md)
+
     L.set_style(CHAIR)
     d = doc_of("撤销", "甲%s。\n" % L.cite("a", [k]))
     ok(L.reflow(d)["ok"], "首轮失败")
-    before = L.body_md(d)
+    before = strip_ts(L.body_md(d))
     L.set_style(IEEE)
     ok(L.reflow(d)["ok"], "切样式重排失败")
-    mid = L.body_md(d)
+    mid = strip_ts(L.body_md(d))
     ok(mid != before, "切到 IEEE 后正文应变化，否则用例无效")
     # getDocId 会返回编辑器里当前打开的文档（可能是用户的），临时钉死到测试文档
     L.plugin_js('const old = p.getDocId; p.getDocId = function () { return "%s"; };\n'
                 'try { await p.undoLast(); } finally { p.getDocId = old; }\n'
                 'return "1";' % d)
-    time.sleep(0.8)
-    after = L.body_md(d)
+    time.sleep(1.2)
+    after = strip_ts(L.body_md(d))
     eq(after, before, "撤销后正文应回到切换样式前的原文")
     eq(L.get_style(), CHAIR, "撤销后设置里的样式也应回到上一步")
     L.rm_doc(d)
@@ -924,6 +929,55 @@ def t33_网页类无作者条目不再每轮漂移():
     L.rm_doc(d)
 
 
+@case
+def t34_重排后自动建活跃文档集合():
+    """
+    v1.2.36：真实插入路径（reflow 结束时会排队同步）后，
+    Zotero 里应出现「【【Connected Documents】】→ 文档名」，成员正是正文引用的那几条。
+    这条用例守的是「refresh → scheduleDocCollection」这根线，而不是直接调 sync。
+    """
+    k1, k2 = KEYS[0]["k"], KEYS[1]["k"]
+    d = doc_of("活跃集合", "甲 %s 乙 %s。\n" % (L.cite("x", [k1]), L.cite("y", [k2])))
+    r = L.reflow(d)
+    ok(r.get("ok"), "重排失败：%s" % (r.get("err") or r))
+    print("         重排结果=%r" % (r.get("r"),))
+    # 集合同步是 900 ms 防抖 + 一次 Zotero 往返，给足时间
+    rec = None
+    for _ in range(12):
+        time.sleep(0.5)
+        info = L.plugin_js('return JSON.stringify((p._docMap || {})[%s] || null);' % json.dumps(d))
+        if isinstance(info, str):
+            try:
+                info = json.loads(info)
+            except Exception:
+                info = None
+        if info and info.get("key"):
+            rec = info
+            break
+    ok(rec is not None, "重排后没有在 docMap 里留下这篇文档的集合映射；docMap=%s 日志=%s" %
+       (L.plugin_js("return JSON.stringify(p._docMap || {});"),
+        L.plugin_js("return JSON.stringify((p._docColLog||[]).slice(-6));")))
+    if not rec:
+        L.rm_doc(d)
+        return
+    got = L.zot(r'''const lib = Zotero.Libraries.userLibraryID;
+let all = await Zotero.Collections.getByLibrary(lib, true);
+const c = all.filter(function (x) { return x.key === "%s"; })[0];
+return JSON.stringify(c ? {name: c.name, items: (c.getChildItems() || []).map(function (i) { return i.key; })} : null);''' % rec["key"])
+    for _ in range(3):
+        if isinstance(got, str):
+            got = json.loads(got)
+        else:
+            break
+    ok(bool(got), "Zotero 里找不到这个集合（key=%s）" % rec["key"])
+    if got:
+        ok(got["name"].startswith("活跃集合"), "集合名应跟随文档标题，实际 %r" % got["name"])
+        eq(sorted(got["items"]), sorted([k1, k2]), "集合成员应与正文引用一致")
+    # 清场：解散这个集合，别把测试痕迹留在用户库里
+    L.plugin_js('return JSON.stringify(await p.dropDocCollection(%s));' % json.dumps(d))
+    L.rm_doc(d)
+
+
 # ---------------------------------------------------------------- 主流程
 
 ALL = [t01_空文档不报错, t02_单条引用正常改写, t03_连续重排幂等, t04_相邻引用合并为一处,
@@ -936,7 +990,8 @@ ALL = [t01_空文档不报错, t02_单条引用正常改写, t03_连续重排幂
        t23_属性在关闭重开笔记本后仍完好, t24_关掉链接后不破坏已有引用, t25_文档属性被清空后能重建,
        t26_命令面板失败有可见提示, t27_列表表格标题里的引用, t28_缺条同时插入新文献,
        t29_复杂文档连跑十轮不漂移, t30_一百条文献, t31_快照里的旧编号被剥掉,
-       t32_换库后缺条文献表不乱序, t33_网页类无作者条目不再每轮漂移]
+       t32_换库后缺条文献表不乱序, t33_网页类无作者条目不再每轮漂移,
+       t34_重排后自动建活跃文档集合]
 
 
 def main():

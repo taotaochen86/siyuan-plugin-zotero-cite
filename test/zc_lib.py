@@ -22,8 +22,11 @@ SIYUAN = "http://127.0.0.1:6806"
 SY_TOKEN = "fqe01efwyfs8yxkm"
 JSBRIDGE = "http://127.0.0.1:6866/run"
 JS_TOKEN = "75bd91c99b2f381d796472815552f411"
-ZOTERO = "http://127.0.0.1:23119/debug-bridge/execute"
-Z_TOKEN = "CTT"
+# ZBridge 原生端点：令牌走 query（?token=），不接受 Authorization: Bearer。
+# 老的原版兼容端点 /debug-bridge/execute 在本机已 401（旧 debug-bridge.token 已删），
+# 所以测试统一改走这里，与插件默认设置一致。
+ZOTERO = "http://127.0.0.1:23119/zbridge/execute"
+Z_TOKEN = "a26c69b1050dbdea9bb5d141d109aeaa"
 
 PLUGIN = "siyuan-plugin-zotero-cite"
 SNAP_ATTR = "custom-zotero-bibsnap"
@@ -84,10 +87,10 @@ def plugin_js(body, timeout=120):
 
 
 def zot(code, timeout=30):
-    """Zotero debug bridge。返回值已拆掉「字符串套 JSON」那层。"""
-    txt = _post(ZOTERO, code,
-                {"Content-Type": "text/plain; charset=utf-8",
-                 "Authorization": "Bearer " + Z_TOKEN}, timeout=timeout, raw=True)
+    """在 Zotero 里执行裸 JS（走 ZBridge 原生端点，令牌放 query）。返回值已拆掉「字符串套 JSON」那层。"""
+    url = ZOTERO + ("&" if "?" in ZOTERO else "?") + "token=" + Z_TOKEN
+    txt = _post(url, code,
+                {"Content-Type": "text/plain; charset=utf-8"}, timeout=timeout, raw=True)
     v = txt
     for _ in range(4):
         if not isinstance(v, str):

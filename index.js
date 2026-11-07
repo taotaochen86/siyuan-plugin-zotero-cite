@@ -81,6 +81,12 @@ const DEFAULT_SETTINGS = {
   //   其它    → 当作模板覆盖，`{n}` 是序号占位符，如 "{n}. " / "[{n}] " / "【{n}】"
   bibNumber: "",
   linkEnabled: true,
+  /*
+   * 活跃文档集合：在这篇文档里用过插件时，在 Zotero 里建一个临时集合
+   * 【【Connected Documents】】→ <文档标题>，收这篇文档引用到的全部文献。
+   * 关闭文档时自动解散；成员只做 addItems/removeItems，不改条目原有归属。
+   */
+  docCollection: true,
   // 内部标记：文末标题的默认值由「参考文献」改成 auto 时迁移过一次，
   // 避免每次启动都把用户显式设置的「参考文献」重新覆盖成 auto
   bibHeadingMigrated: false,
@@ -99,6 +105,247 @@ const DEP_URL = "https://github.com/taotaochen86/zbridge/releases/latest";
 const DEP_TOKEN_PREF = "extensions.zotero.zbridge.token";
 /** 老默认地址（原版 Debug Bridge 端点，ZBridge 也保留为兼容端点），仅用于一次性迁移 */
 const LEGACY_BRIDGE_URL = "http://127.0.0.1:23119/debug-bridge/execute";
+
+/**
+ * 从 eventBus 事件里取 protyle。
+ *
+ * 真实事件的形状是 `{detail: {protyle}}`；但不同调用方（以及测试里手动 emit 时）
+ * 可能在外面再套一层 detail，两种都认一下，免得一处取不到就整条链静默不工作。
+ */
+function protyleOfEvent(e) {
+  const d = e && e.detail;
+  if (!d) {
+    return null;
+  }
+  if (d.protyle) {
+    return d.protyle;
+  }
+  if (d.detail && d.detail.protyle) {
+    return d.detail.protyle;
+  }
+  return null;
+}
+
+/* ---------------- 活跃文档集合 ---------------- */
+
+/**
+ * 顶级集合名。**跨软件共用**：WPS 插件（ZoteroCiteWps）建的子集合也挂在这同一个顶级下，
+ * 将来别的编辑器接进来同样往这里挂，所以名字要中性，不要带软件名。
+ * 用户 2026-11-07 明确要求：二级结构即可（顶级 → 文档名），**不要**再加来源分组。
+ */
+const DOC_PARENT = "【【Connected Documents】】";
+/**
+ * 旧顶级名，按「越新越靠前」排。找到哪一个都认作同一个顶级，sync 时原地改名，
+ * 子集合一个不搬 —— 用户 2026-11-07 要求把【【活跃文档】】改成【【Connected Documents】】，
+ * 已经建好的那棵树不能重建（重建会丢成员）。
+ *   【【Connected Document】】 ← 1.2.37 早期的名字（少了复数 s）
+ *   【【活跃文档】】           ← 1.2.36 用的名字
+ *   WPS 活跃文档               ← WPS 插件 ≤1.1.1 用的名字
+ */
+const DOC_LEGACY_PARENTS = ["【【Connected Document】】", "【【活跃文档】】", "WPS 活跃文档"];
+/** docId → {key, name} 映射，单独一个文件，不塞进 conf.json（免得设置被 pickSettings 过滤掉） */
+const DOCMAP_FILE = "docmap.json";
+
+/** 思源文档 id 形如 20261031203523-ozf451t，后缀那 7 位才是人眼可辨的部分 */
+function docTailOf(docId) {
+  const s = String(docId || "");
+  const i = s.indexOf("-");
+  return i >= 0 ? s.slice(i + 1) : s.slice(-7);
+}
+
+/**
+ * 集合显示名。
+ *
+ * ⚠️ 思源允许两篇文档同名，Zotero 也允许两个集合同名 —— 但人看着会懵，
+ *    所以撞名时给后来者加一个 `· <docId 后缀>`。判断依据是本地 docmap
+ *    （docId → 上次用的名字），只有「另一个 docId 已经在用这个名字」才算撞。
+ */
+function docCollectionName(title, docId, docMap) {
+  const t = String(title || "").trim();
+  if (!t) {
+    return "";
+  }
+  const mine = docMap && docMap[docId];
+  const key = mine && mine.key;
+  let clash = false;
+  for (const id in (docMap || {})) {
+    if (id === docId) {
+      continue;
+    }
+    const rec = docMap[id];
+    if (!rec || String(rec.name || "") !== t) {
+      continue;
+    }
+    // 同一个集合（key 相同）不算撞名，那是历史映射残留
+    if (key && rec.key === key) {
+      continue;
+    }
+    clash = true;
+    break;
+  }
+  return clash ? t + " · " + docTailOf(docId) : t;
+}
+
+/**
+ * Zotero 侧脚本。
+ *
+ * 三个动作：
+ *   sync → 找（或建）该文档的子集合，成员按 keys 多删少补
+ *   drop → 解散该文档的子集合；若顶级下已经没有任何子集合，顶级一起收掉
+ *   list → 列出顶级下所有子集合，供「文档已关掉」的残渣清理用
+ *
+ * ⚠️ 只在自己这棵树里动手：parent 一定是「顶级集合」，子集合一定校验 parentID，
+ *    collectionKey 传串了也只会被忽略后重建，绝不去改用户自己的集合。
+ * ⚠️ addItems / removeItems 必须包在 Zotero.DB.executeTransaction 里，
+ *    裸调报 "Not in transaction"（Zotero 10 实测，见 WPS 插件同款实现）。
+ * ⚠️ 删父集合会带走子集合，所以 prune 前必须重新读一次集合列表，
+ *    否则会把这期间别的文档刚建的集合连带删掉。
+ */
+function docCollectionScript(payload) {
+  const P = payload || {};
+  const pack = {
+    action: String(P.action || "sync"),
+    collectionKey: String(P.collectionKey || ""),
+    docName: String(P.docName || ""),
+    parentName: String(P.parentName || DOC_PARENT),
+    // 旧顶级名候选（按新旧排序）。命中最靠前的那个就当同一个顶级，sync 时改名。
+    legacyParents: (P.legacyParents || DOC_LEGACY_PARENTS).map(String),
+    // 已知属于「别的文档」的集合 key：按名字兜底找的时候要跳过，
+    // 否则两篇文档（或 WPS 与思源各一篇）同名时会互抢同一个集合
+    avoidKeys: (P.avoidKeys || []).map(String),
+    // 有 collectionKey 时一律传 false：只按 key 找，找不到就新建。
+    // 不然「集合被用户删了 + 恰好有别人的同名集合」就会把别人的接管过来。
+    allowNameFallback: P.allowNameFallback !== false,
+    keys: (P.keys || []).map(String),
+  };
+  return [
+    "const P = " + JSON.stringify(pack) + ";",
+    "const lib = Zotero.Libraries.userLibraryID;",
+    "let all = Zotero.Collections.getByLibrary(lib, true);",
+    "if (all && typeof all.then === 'function') all = await all;",
+    "all = all || [];",
+    "let parent = null;",
+    "for (let i = 0; i < all.length; i++) {",
+    "  const c = all[i];",
+    "  if (!c.parentID && c.name === P.parentName) { parent = c; break; }",
+    "}",
+    /* 旧顶级名：认它当同一个顶级，sync 时原地改名。list / drop 只读、只删。
+       候选按新旧排，逐个试 —— 用户改过一次名，机器上可能停在任意一代。 */
+    "if (!parent && P.legacyParents && P.legacyParents.length) {",
+    "  for (let j = 0; j < P.legacyParents.length && !parent; j++) {",
+    "    for (let i = 0; i < all.length; i++) {",
+    "      const c = all[i];",
+    "      if (!c.parentID && c.name === P.legacyParents[j]) { parent = c; break; }",
+    "    }",
+    "  }",
+    "}",
+    /* 文档名先校验：别为了报个错反而建出一个空顶级集合 */
+    "if (P.action === 'sync' && !P.docName) return JSON.stringify({ok: false, error: 'docName-missing'});",
+    "let renamed = false;",
+    "if (P.action === 'sync') {",
+    "  if (!parent) {",
+    "    parent = new Zotero.Collection();",
+    "    parent.libraryID = lib;",
+    "    parent.name = P.parentName;",
+    "    await parent.saveTx();",
+    "  } else if (parent.name !== P.parentName) {",
+    "    parent.name = P.parentName;",
+    "    await parent.saveTx();",
+    "    renamed = true;",
+    "  }",
+    "}",
+    "const kids = function () {",
+    "  return parent ? all.filter(function (c) { return c.parentID === parent.id; }) : [];",
+    "};",
+    /* ---- list ---- */
+    "if (P.action === 'list') {",
+    "  return JSON.stringify({ok: true,",
+    "    parent: parent ? {key: parent.key, id: parent.id, name: parent.name} : null,",
+    "    renamed: renamed,",
+    "    children: kids().map(function (c) {",
+    "      let n = 0; try { n = (c.getChildItems() || []).length; } catch (e) { n = -1; }",
+    "      return {key: c.key, name: c.name, items: n, modified: String(c.dateModified || '')};",
+    "    })});",
+    "}",
+    /* ---- drop ---- */
+    "if (P.action === 'drop') {",
+    "  let hit = null;",
+    "  const ks = kids();",
+    "  if (P.collectionKey) {",
+    "    for (let i = 0; i < ks.length; i++) { if (ks[i].key === P.collectionKey) { hit = ks[i]; break; } }",
+    "  }",
+    "  if (!hit && P.docName) {",
+    "    for (let i = 0; i < ks.length; i++) {",
+    "      if (ks[i].name !== P.docName) continue;",
+    "      if (P.avoidKeys.indexOf(ks[i].key) >= 0) continue;",
+    "      hit = ks[i]; break;",
+    "    }",
+    "  }",
+    "  if (!hit) return JSON.stringify({ok: true, dropped: false, reason: 'not-found'});",
+    "  const nm = hit.name;",
+    "  const hk = hit.key;",
+    "  await hit.eraseTx();",
+    "  let pruned = false;",
+    "  let fresh = [];",
+    "  try { fresh = await Zotero.Collections.getByLibrary(lib, true); } catch (e) { fresh = null; }",
+    "  if (fresh && parent) {",
+    "    const remain = fresh.filter(function (c) { return c.parentID === parent.id && c.id !== hit.id; });",
+    "    if (!remain.length) { await parent.eraseTx(); pruned = true; }",
+    "  }",
+    "  return JSON.stringify({ok: true, dropped: true, key: hk, name: nm, pruned: pruned});",
+    "}",
+    /* ---- sync ---- */
+    "let col = null;",
+    "if (P.collectionKey) {",
+    "  let c = null;",
+    "  try { c = Zotero.Collections.getByLibraryAndKey(lib, P.collectionKey); } catch (e) { c = null; }",
+    "  if (c && c.parentID === parent.id) col = c;",
+    "}",
+    "if (!col && P.allowNameFallback) {",
+    "  const ks = kids();",
+    "  for (let i = 0; i < ks.length; i++) {",
+    "    if (ks[i].name !== P.docName) continue;",
+    "    if (P.avoidKeys.indexOf(ks[i].key) >= 0) continue;",
+    "    col = ks[i]; break;",
+    "  }",
+    "}",
+    "let created = false;",
+    "if (!col) {",
+    "  col = new Zotero.Collection();",
+    "  col.libraryID = lib;",
+    "  col.name = P.docName;",
+    "  col.parentID = parent.id;",
+    "  await col.saveTx();",
+    "  created = true;",
+    "} else if (col.name !== P.docName) {",
+    /* 文档改名后集合跟着改 */
+    "  col.name = P.docName;",
+    "  await col.saveTx();",
+    "}",
+    /* key → itemID：找不到的记进 missing，不让整次同步失败（文献被删是常态） */
+    "const ids = []; const missing = [];",
+    "P.keys.forEach(function (k) {",
+    "  let it = null;",
+    "  try { it = Zotero.Items.getByLibraryAndKey(lib, k); } catch (e) { it = null; }",
+    "  if (it && it.id) ids.push(it.id); else missing.push(k);",
+    "});",
+    "const have = (col.getChildItems() || []).map(function (i) { return i.id; });",
+    "const toAdd = ids.filter(function (id) { return have.indexOf(id) < 0; });",
+    "const toRemove = have.filter(function (id) { return ids.indexOf(id) < 0; });",
+    "let added = 0, removed = 0;",
+    "if (toAdd.length) {",
+    "  await Zotero.DB.executeTransaction(async function () { await col.addItems(toAdd); });",
+    "  added = toAdd.length;",
+    "}",
+    "if (toRemove.length) {",
+    "  await Zotero.DB.executeTransaction(async function () { await col.removeItems(toRemove); });",
+    "  removed = toRemove.length;",
+    "}",
+    "return JSON.stringify({ok: true, key: col.key, name: col.name, parent: parent.key,",
+    "  renamed: renamed, created: created, added: added, removed: removed,",
+    "  total: ids.length, missing: missing});",
+  ].join("\n");
+}
 
 /**
  * 顶栏图标（32 栅格，画在 2 单位整数栅格上 —— 思源顶栏只显示 16px，
@@ -1470,6 +1717,11 @@ module.exports = class ZoteroCite extends Plugin {
     this._inUndo = false;
     this._lastStyleId = null;
     this._styleBeforeChange = null;
+    /* 活跃文档集合：docId → {key, name, at}，以及每文档一个防抖计时器 */
+    this._docMap = {};
+    this._docSyncTimers = {};
+    this._docColLog = [];
+    await this.loadDocMap();
 
     /* 设置面板 */
     this.setting = new Setting({
@@ -1504,6 +1756,80 @@ module.exports = class ZoteroCite extends Plugin {
     };
     this.eventBus.on("loaded-protyle-static", track);
     this.eventBus.on("switch-protyle", track);
+
+    /*
+     * 活跃文档集合：打开文档就对齐一次，关掉文档就解散。
+     *
+     * ⚠️ destroy-protyle 在「切标签」时不一定触发，而且它比文档真正从 DOM 上摘掉更早，
+     *    所以延迟 700 ms 再确认一次「这篇是不是还开着」。openDocIds() 返回 null
+     *    （问不出来）时**不删**，留给下次启动的 sweep 收拾 —— 宁可留空壳，不可误删。
+     */
+    /* 前端重载 / 退出程序时，protyle 会全部销毁，那不是「用户关了文档」 */
+    this._pageUnloading = false;
+    this._unloadHandler = () => { this._pageUnloading = true; };
+    window.addEventListener("beforeunload", this._unloadHandler);
+
+    this.eventBus.on("loaded-protyle-dynamic", (e) => {
+      const p = protyleOfEvent(e);
+      const docId = p && p.block && p.block.rootID;
+      this.logDocCol("loaded", { docId: docId || null });
+      if (docId) {
+        this.scheduleDocCollection(String(docId), null, 1200);
+      }
+    });
+    this.eventBus.on("destroy-protyle", (e) => {
+      const p = protyleOfEvent(e);
+      const docId = p && p.block && p.block.rootID;
+      this.logDocCol("destroy", { docId: docId || null, hasProtyle: !!p, unloading: !!this._pageUnloading });
+      if (!docId) {
+        return;
+      }
+      /*
+       * 前端重载 / 退出程序时，所有 protyle 都会被销毁 —— 那不是「用户关了文档」，
+       * 重载后还会重新打开。这种时候不解散，否则每次刷新界面都会把集合删一遍。
+       */
+      if (this._pageUnloading) {
+        return;
+      }
+      const id = String(docId);
+      /*
+       * 关文档 → 解散集合。
+       *
+       * ⚠️ 判定用「DOM 上还有没有这篇的活编辑器」：
+       *    · 明确还开着（同一文档在两个标签里）→ 不动；
+       *    · DOM 还没就绪（刚 reload 时会短暂查不到，浏览器里现在只会返回空数组）→ 重试；
+       *    · 重试完仍查不到 → 按「已关闭」处理。
+       *    早先的写法把「查不到」当成"不确定 → 不删"，而关闭文档时恰恰就是查不到，
+       *    于是集合永远留着 —— 用户 2026-11-07 报的「关文档没解散」就是这个。
+       */
+      const attempt = (n) => {
+        const open = this.openDocIds();
+        const still = !!(open && open.indexOf(id) >= 0);
+        this.logDocCol("destroy-check", { docId: id, open: open, stillOpen: still, attempt: n });
+        if (still) {
+          return;
+        }
+        if (!open && n < 3) {
+          setTimeout(() => attempt(n + 1), 800);
+          return;
+        }
+        this.dropDocCollection(id).then((r) => {
+          this.logDocCol("destroy-drop", { docId: id, r: r });
+        }).catch((err) => {
+          this.logDocCol("destroy-drop-error", { docId: id, err: String((err && err.message) || err) });
+          console.log("[zotero-cite] 解散活跃文档集合失败：", err && err.message ? err.message : err);
+        });
+      };
+      setTimeout(() => attempt(0), 1200);
+    });
+    /*
+     * 启动后清一次残渣：上次退出时没来得及解散的集合。
+     * 15 s 是给编辑器铺开留的余量 —— sweep 里还有一道「一个编辑器都没有就不扫」的门闩，
+     * 两道加起来才能保证既清得掉残渣、又不会把刚启动时的空白页当成"文档全关了"。
+     */
+    setTimeout(() => {
+      this.sweepDocCollections().catch(() => {});
+    }, 15000);
 
     /* 块内右键菜单 → 插入 Zotero 文献引用（与顶栏按钮、/zotero 等价） */
     this.bindContentMenu();
@@ -1673,6 +1999,13 @@ module.exports = class ZoteroCite extends Plugin {
       document.removeEventListener("keydown", this._escHandler, true);
     }
     this.closeCiteMenu();
+    if (this._unloadHandler) {
+      window.removeEventListener("beforeunload", this._unloadHandler);
+    }
+    if (this._docSyncTimers) {
+      Object.keys(this._docSyncTimers).forEach((id) => clearTimeout(this._docSyncTimers[id]));
+      this._docSyncTimers = {};
+    }
     console.log("[zotero-cite] unloaded");
   }
 
@@ -1680,6 +2013,7 @@ module.exports = class ZoteroCite extends Plugin {
 
   async updateSettings(patch) {
     const prevStyle = this.settings.styleId;
+    const prevDocCol = this.settings.docCollection;
     this.settings = Object.assign({}, this.settings, pickSettings(patch));
     // 记下「改之前」的样式：撤销要回到这个，而不是回到刚改完的样式。
     // 放在这个统一入口，设置页 / 右键样式选择器 / 命令 都覆盖得到。
@@ -1691,6 +2025,14 @@ module.exports = class ZoteroCite extends Plugin {
       await this.saveData(CONF_FILE, this.settings);
     } catch (e) {
       console.warn("[zotero-cite] saveData failed:", e && e.message ? e.message : e);
+    }
+    /*
+     * 关掉「活跃文档集合」这个开关时，顺手把本机建过的集合收掉 ——
+     * 用户关开关的意图就是不想让 Zotero 里再多出东西，留一堆空壳反而更烦。
+     * 只删本地映射里有的，别人的集合一个不碰。
+     */
+    if (prevDocCol && !this.settings.docCollection) {
+      this.dropAllDocCollections().catch(() => {});
     }
   }
 
@@ -1849,6 +2191,295 @@ module.exports = class ZoteroCite extends Plugin {
       }
     }
     return null;
+  }
+
+  /* ---------------- 活跃文档集合（Zotero 侧的临时集合） ---------------- */
+
+  /**
+   * 文档标题。
+   *
+   * ⚠️ 不能只查 SQL 的 `blocks.content`：刚 createDocWithMd 建出来的文档，
+   *    SQL 索引要一会儿才有（踩坑记录：新建文档 0.8 s 仍查不到），
+   *    那段时间里「标题取不到 → 不同步」，用户新建文档插第一条引用就没集合。
+   *    所以先走 getHPathByID（`/笔记本/父文档/当前文档`，最后一段就是标题），
+   *    它读的是文件树、没有索引延迟；失败再退回 SQL。
+   */
+  async docTitleOf(docId) {
+    if (!docId) {
+      return "";
+    }
+    try {
+      const r = await apiQuiet("/api/filetree/getHPathByID", { id: docId });
+      const hp = (r && r.code === 0 && r.data) || "";
+      const seg = String(hp).split("/").filter(Boolean).pop() || "";
+      if (seg) {
+        return seg.replace(/\.sy$/, "").trim();
+      }
+    } catch (e) { /* 退回 SQL */ }
+    try {
+      const rows = await this.querySql(`SELECT content FROM blocks WHERE id='${String(docId).replace(/'/g, "")}'`);
+      return String((rows[0] && rows[0].content) || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  /**
+   * 当前**打开着**的文档 id 列表。
+   * 返回 null = 问不出来（调用方必须当成「不确定」，不要据此删东西）。
+   *
+   * ⚠️ 主用 DOM：每个打开过的标签都有 `.protyle-title[data-node-id]`，
+   *    隐藏标签的 DOM 也还在。layout 遍历作补充（有的标签还没铺开 protyle）。
+   *    两者都拿不到 → null。
+   */
+  openDocIds() {
+    /*
+     * 返回 null 只表示「这个环境根本查不了」（脚本化调用、单测里没有 document）。
+     * 浏览器里一律返回数组，**没有任何文档开着就是空数组**。
+     */
+    if (typeof document === "undefined" || !document.querySelectorAll) {
+      return null;
+    }
+    const ids = new Set();
+    const nodes = document.querySelectorAll(".protyle-title[data-node-id]");
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      /*
+       * ⚠️ 只认「还活着的编辑器」。
+       *    思源销毁 protyle 时先 `element.classList.remove("protyle")`，
+       *    之后才把节点摘出 DOM；这中间（甚至更久，若 element 被暂存）
+       *    `.protyle-title[data-node-id]` 依然能查到 —— 拿它当「还开着」，
+       *    关闭文档时就永远不会解散集合（用户实测踩到）。
+       *    判据：祖先必须是带 protyle 类、且仍连在文档上的节点。
+       */
+      const pn = el.closest ? el.closest(".protyle") : null;
+      if (!pn || !pn.classList.contains("protyle")) {
+        continue;
+      }
+      if (typeof pn.isConnected === "boolean" && !pn.isConnected) {
+        continue;
+      }
+      const id = el.getAttribute("data-node-id");
+      if (id) {
+        ids.add(String(id));
+      }
+    }
+    return Array.from(ids);
+  }
+
+  async loadDocMap() {
+    try {
+      const m = await this.loadData(DOCMAP_FILE);
+      this._docMap = (m && typeof m === "object") ? m : {};
+    } catch (e) {
+      this._docMap = {};
+    }
+  }
+
+  async saveDocMap() {
+    try {
+      await this.saveData(DOCMAP_FILE, this._docMap || {});
+    } catch (e) {
+      console.warn("[zotero-cite] saveData(docmap) failed:", e && e.message ? e.message : e);
+    }
+  }
+
+  /** 统一入口：把 payload 补上顶级名与旧名，再交给 ZBridge 执行 */
+  docCollectionCall(payload) {
+    return zoteroExec(this.settings, docCollectionScript(Object.assign({
+      parentName: DOC_PARENT,
+      legacyParents: DOC_LEGACY_PARENTS,
+    }, payload || {})));
+  }
+
+  /** 扫这篇文档当前引用到的全部 key（正文，不含文末跳转链接） */
+  async collectDocKeys(docId) {
+    const r = await fetchSyncPost("/api/export/exportMdContent", { id: docId });
+    const md = (r && r.data && r.data.content) || "";
+    return scanCites(maskCode(md).s, this.settings.defaultFormat).keys;
+  }
+
+  /**
+   * 让 Zotero 里的「本文件集合」与 keys 对齐。
+   * keys 传 null = 让插件自己去文档里扫（文档打开时用）。
+   *
+   * 全程静默失败：Zotero 没开、令牌没填、文档没标题……都只是「这次没同步」，
+   * 绝不能因此打断用户的插入/重排流程。
+   */
+  async syncDocCollection(docId, keys) {
+    if (!this.settings.docCollection || !docId || !this.settings.token) {
+      this.logDocCol("sync-skip", { docId: docId || null, off: !this.settings.docCollection, noToken: !this.settings.token });
+      return { ok: false, skipped: "off" };
+    }
+    const map = this._docMap || (this._docMap = {});
+    const rec = map[docId] || {};
+    const title = await this.docTitleOf(docId);
+    if (!title) {
+      this.logDocCol("sync-skip", { docId: docId, reason: "no-title" });
+      return { ok: false, skipped: "no-title" };
+    }
+    /*
+     * 文档里一条引用都没有、而且还没建过集合 → 别建空壳。
+     * 已经有集合的照常同步，keys 为空就把成员清空（等关文档时解散）。
+     */
+    if (!rec.key && !(keys && keys.length)) {
+      this.logDocCol("sync-skip", { docId: docId, reason: "empty" });
+      return { ok: false, skipped: "empty" };
+    }
+    let list = null;
+    let avoidKeys = [];
+    if (!rec.key) {
+      /* 第一次给这篇文档建集合：先看一眼顶级下已有什么。
+         凡是「本地映射里没有的」集合，都当成别人的（可能是 WPS 那边的同名文档），
+         兜底按名字找时必须跳过它们 —— 否则两篇同名文档会互抢同一个集合。 */
+      try {
+        list = await this.docCollectionCall({ action: "list" });
+      } catch (e) {
+        list = null;
+      }
+      if (list && list.ok && Array.isArray(list.children)) {
+        const mine = new Set(Object.keys(map).map((id) => (map[id] && map[id].key) || "").filter(Boolean));
+        avoidKeys = list.children.filter((c) => c && c.key && !mine.has(c.key)).map((c) => c.key);
+      }
+    }
+    const name = docCollectionName(title, docId, map);
+    const r = await this.docCollectionCall({
+      action: "sync",
+      collectionKey: rec.key || "",
+      docName: name,
+      keys: keys || [],
+      avoidKeys: avoidKeys,
+      // 有 key 时严格按 key 找：找不到就新建，绝不去按名字捡别人的集合
+      allowNameFallback: !rec.key,
+    });
+    if (r && r.ok && r.key) {
+      map[docId] = { key: r.key, name: r.name, at: new Date().toISOString() };
+      await this.saveDocMap();
+    }
+    this.logDocCol("sync", { docId: docId, name: name, r: r });
+    return r;
+  }
+
+  /** 解散这篇文档的集合（顶级下没有别的了，脚本会把顶级一起收掉） */
+  async dropDocCollection(docId) {
+    const map = this._docMap || (this._docMap = {});
+    const rec = map[docId];
+    this.cancelDocSync(docId);
+    if (!rec) {
+      return { ok: false, skipped: "no-record" };
+    }
+    const avoidKeys = Object.keys(map)
+      .filter((id) => id !== docId)
+      .map((id) => (map[id] && map[id].key) || "")
+      .filter(Boolean);
+    let r = null;
+    try {
+      r = await this.docCollectionCall({
+        action: "drop",
+        collectionKey: rec.key || "",
+        docName: rec.name || "",
+        avoidKeys: avoidKeys,
+      });
+    } finally {
+      delete map[docId];
+      await this.saveDocMap();
+    }
+    return r;
+  }
+
+  /** 关掉开关时把本机建过的集合全部收掉（只动自己这棵树） */
+  async dropAllDocCollections() {
+    const map = this._docMap || {};
+    const ids = Object.keys(map);
+    for (const id of ids) {
+      try {
+        await this.dropDocCollection(id);
+      } catch (e) { /* 尽力而为 */ }
+    }
+  }
+
+  /**
+   * 清理残渣：本地映射里有、但对应文档已经不在编辑器里的，解散掉。
+   *
+   * ⚠️ 只清「本地映射里有的」。Zotero 里那些映射里没有的集合（换电脑后映射丢了、
+   *    或者根本是别的软件建的）一律不动 —— 宁可留着空壳，也不能误删别人的东西。
+   * ⚠️ 问不出打开文档列表（openDocIds() 返回 null）时直接跳过。
+   */
+  async sweepDocCollections() {
+    if (!this.settings.docCollection || !this.settings.token) {
+      return { swept: 0, skipped: "off" };
+    }
+    const open = this.openDocIds();
+    if (!open) {
+      return { swept: 0, skipped: "unknown-open-docs" };
+    }
+    /*
+     * 门闩：页面上一个编辑器都没有时，分不清「用户真把文档全关了」还是
+     * 「前端刚启动、编辑器还没渲染出来」。后者若当成前者，就会把用户正在用的集合全清空
+     * —— 2026-11-07 实测踩到：reload 后 8 秒扫一次，把「2026-11-07」的集合同步删光了。
+     * 所以只有在确实有编辑器渲染出来时才清理；宁可留空壳，不可误删。
+     */
+    if (typeof document !== "undefined" && document.querySelectorAll &&
+        document.querySelectorAll(".protyle").length === 0) {
+      return { swept: 0, skipped: "no-editor" };
+    }
+    const openSet = new Set(open);
+    let swept = 0;
+    for (const id of Object.keys(this._docMap || {})) {
+      if (openSet.has(id)) {
+        continue;
+      }
+      try {
+        const r = await this.dropDocCollection(id);
+        if (r && r.dropped) {
+          swept++;
+        }
+      } catch (e) { /* 一条失败不影响别的 */ }
+    }
+    return { swept };
+  }
+
+  /** 防抖排队：同一文档连改几下只同步一次 */
+  scheduleDocCollection(docId, keys, delay) {
+    if (!this.settings.docCollection) {
+      return;
+    }
+    const timers = this._docSyncTimers || (this._docSyncTimers = {});
+    if (timers[docId]) {
+      clearTimeout(timers[docId]);
+    }
+    timers[docId] = setTimeout(() => {
+      delete timers[docId];
+      const job = (keys === null || keys === undefined)
+        ? this.collectDocKeys(docId).then((ks) => this.syncDocCollection(docId, ks))
+        : this.syncDocCollection(docId, keys);
+      this.logDocCol("sync-run", { docId: docId, scanned: keys === null || keys === undefined });
+      job.catch((e) => {
+        this.logDocCol("sync-error", { docId: docId, err: String((e && e.message) || e) });
+        console.log("[zotero-cite] 活跃文档集合同步跳过：", e && e.message ? e.message : e);
+      });
+    }, typeof delay === "number" ? delay : 900);
+  }
+
+  cancelDocSync(docId) {
+    const timers = this._docSyncTimers;
+    if (timers && timers[docId]) {
+      clearTimeout(timers[docId]);
+      delete timers[docId];
+    }
+  }
+
+  /**
+   * 记一条集合相关的决策（只留最近 60 条，只在内存里）。
+   * 目的：出问题时不用让用户复述，直接看「事件有没有来、来的 docId 对不对、
+   * 当时判成还开着还是关掉了」，一眼定位是事件没触发还是判断错了。
+   */
+  logDocCol(evt, info) {
+    const log = this._docColLog || (this._docColLog = []);
+    log.push(Object.assign({ t: new Date().toISOString(), evt }, info || {}));
+    while (log.length > 60) {
+      log.shift();
+    }
   }
 
   /* ---------------- 插入 ---------------- */
@@ -3495,6 +4126,12 @@ module.exports = class ZoteroCite extends Plugin {
       showMessage(`已重排 ${updated} 处引用、${scan.keys.length} 条参考文献（${styleName}）${tail}${warn}`,
         missingKeys.length ? 9000 : (skipped ? 7000 : 4000));
     }
+    /*
+     * 把这篇文档引用到的文献同步进 Zotero 的「【【Connected Documents】】→ 文档名」集合。
+     * 放在最后、失败不影响主流程：Zotero 没开只是这次没同步，重排本身已经做完了。
+     */
+    this.scheduleDocCollection(docId, scan.keys);
+
     return { updated, keys: scan.keys.length, missing: missingKeys.length };
   }
 
@@ -4179,6 +4816,11 @@ return JSON.stringify({ok: !!s, title: s ? s.title : null});`);
             <label class="zc-field__label">引用带链接（可点击跳回 Zotero）</label>
             <input type="checkbox" data-k="linkEnabled">
           </div>
+          <div class="zc-field zc-field--inline">
+            <label class="zc-field__label">活跃文档集合（Zotero 里自动建「【【Connected Documents】】→ 文档名」）</label>
+            <input type="checkbox" data-k="docCollection">
+          </div>
+          <div class="zc-field__hint">打开文档或改动引用时，在 Zotero 里自动建一个以文档名命名的临时集合，收这篇文档引用到的全部文献；关闭文档时自动解散，顶级集合下没有别的文档了就一起收掉。成员只做「加进来 / 移出去」，<b>不会改动文献原本在你各集合里的归属</b>。顶级集合跨软件共用，WPS 插件建的集合也在它下面。关掉这个开关会把本机建过的集合收掉。</div>
         </div>
         <div class="zc-actions">
           <button class="b3-button b3-button--text zc-save">保存</button>
@@ -4311,3 +4953,18 @@ return JSON.stringify({ok: !!s, title: s ? s.title : null});`);
     this.updateStyleStat();
   }
 };
+
+/*
+ * 离线单测用的内部出口。
+ * module.exports 是插件类本身（思源靠它实例化），这里把几个纯函数挂到类上，
+ * 测试里把 require("siyuan") 换成桩就能直接跑，不必再复制一份实现去测。
+ */
+try {
+  module.exports.__docCollectionScript = docCollectionScript;
+  module.exports.__docCollectionName = docCollectionName;
+  module.exports.__docTailOf = docTailOf;
+  module.exports.__DOC_PARENT = DOC_PARENT;
+  module.exports.__DOC_LEGACY_PARENTS = DOC_LEGACY_PARENTS;
+  // 兼容旧测试的写法
+  module.exports.__DOC_LEGACY_PARENT = DOC_LEGACY_PARENTS[0];
+} catch (e) { /* 挂不上也不影响插件本体 */ }

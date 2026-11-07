@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.35
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.37
 
 **English** | [简体中文](./README.md)
 
@@ -25,6 +25,7 @@ Both the in-text citations — merged as `(Dela Cruz et al., 2026; Ge et al., 20
 | 2.7 Parent items only | Selecting a PDF or an annotation in Zotero resolves to its parent item; standalone notes and attachments never appear |
 | 2.8 Undo | 20 steps per document, style switches included |
 | 2.9 Citation snapshot fallback | The trimmed CSL data of every reference plus its last rendered text are stored in a document attribute (~0.3 KB each). When an item is gone from Zotero, or missing on this machine after a sync, re-rendering restores the previous text and tells you exactly which keys it could not find |
+| 2.11 Active-document collection | While you work in a document the plugin keeps a temporary Zotero collection `【【Connected Documents】】 → <document title>` holding every item that document cites. Members follow your edits, the name follows renames, the collection is dissolved when the document closes (and the top-level collection with it once nothing is left). It only adds/removes items — your existing collection memberships are untouched |
 | 2.10 Only the blocks that changed | Blocks whose content is unchanged are not written at all — the same holds for citations inside lists, tables and headings; ten consecutive runs leave both content and block attributes untouched |
 
 ## 3 Problems it solves in SiYuan
@@ -98,6 +99,7 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | Style status | checked automatically | Opening the panel verifies that this style exists in Zotero on this machine: `✓ installed: …` in grey; `✗ this style is not installed, refresh and insert will be refused` in red, with a "use the built-in APA" button; if Zotero is unreachable it only says it cannot tell, and offers no button |
 | Bibliography heading | Auto | "Auto" picks 参考文献 or References from the CSL style's language; choose "no heading" to output entries only and write the heading yourself; or type any custom text |
 | Citations carry links | on | Turn off for plain text; click-to-Zotero and the right-click menu stop working |
+| Active-document collection | on | Turn off to stop creating collections and to remove the ones this machine created. See 7.6 |
 
 When the style is missing the plugin **does not** quietly substitute another one and overwrite the whole document: the refresh is refused, not a single byte of the body changes, and the message names the missing style. This typically happens when SiYuan settings sync to a machine that lacks that `.csl`.
 
@@ -254,6 +256,20 @@ Three limits on this path:
 2. After relinking, `?zkeys=` in the body link carries the new key and the old one survives only in the snapshot; subsequent renders read the live item
 3. The snapshot keeps last render's order, so if you reorder items after switching libraries the narrative text may show a different order — check before switching
 
+### 7.6 Active-document collection
+
+```
+【【Connected Documents】】          <- top level, shared across editors (WPS plugin collections live here too)
+   └─ Paper draft        <- document name; members = every item this document cites
+```
+
+- Created only once the document actually cites something; membership is kept in sync on every insert / edit / refresh; a rename renames the collection.
+- Dissolved when the document's tab is closed; the top-level collection is removed as well once no document collections remain.
+- Only `addItems` / `removeItems` inside the plugin's own tree — items keep their original collection memberships, and dissolving only erases the collection shell, never the items.
+- Two documents with the same title get two collections (the later one is suffixed `· <docId tail>`); a same-named collection created by someone else is never hijacked.
+- Turn it off in the settings panel to stop it and to remove the collections this machine created.
+- **Existing collections are renamed, not rebuilt**: the top level has been renamed three times (`WPS 活跃文档` → `【【活跃文档】】` → `【【Connected Document】】` → `【【Connected Documents】】`). The plugin recognises all three earlier names and renames them in place — child collections are not moved and no membership is lost.
+
 ## 8 Limitations
 
 1. **Hard dependency on Zotero + ZBridge** — without it the plugin does nothing; it is not self-contained
@@ -311,6 +327,8 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.2.37 | 2026-11-07 | **Top-level collection renamed to `【【Connected Documents】】`** (was `【【活跃文档】】`), in step with the WPS plugin. Older names are still recognised: `【【活跃文档】】`, the even older `WPS 活跃文档`, and the singular `【【Connected Document】】` used briefly before the final wording are all **renamed in place** — child collections are not moved, no membership is lost, and no duplicate tree is created. If several legacy names exist side by side, the newest one wins and the others are left untouched |
+| 1.2.36 | 2026-11-07 | **Active-document collection**: a temporary Zotero collection `【【活跃文档】】 → <document title>` holds every item the document cites, follows edits and renames, and is dissolved when the document closes (top level goes with the last one). Only `addItems` / `removeItems`, never touching existing memberships. Shared top level, so WPS plugin collections sit beside it. Can be turned off. **Four bugs found and fixed on the way**: (1) "is this document still open" was decided by a DOM selector that also matched already-destroyed editors (SiYuan strips the `protyle` class before removing the node), so closing a document never dissolved the collection; (2) a frontend reload destroys every protyle, which is not the user closing documents — guarded with a `beforeunload` flag; (3) the leftover sweep must first confirm at least one editor is rendered, otherwise it wiped the collections of documents open at that moment (hit in practice); (4) document titles are read through `getHPathByID` because `blocks.content` in SQL lags behind for a freshly created document |
 | 1.2.35 | 2026-11-06 | **Fully switched to ZBridge**: the plugin no longer depends on the Zotero Debug Bridge. (1) The default bridge URL is now ZBridge's native endpoint `http://127.0.0.1:23119/zbridge/execute`, with the token appended to the query automatically; a stored `/debug-bridge/execute` value is migrated once on upgrade (a hand-edited URL is left alone). (2) The bazaar card description, the dependency block in the settings panel, and the connection-failure / 401 messages all point at ZBridge (<https://github.com/taotaochen86/zbridge/releases/latest>) and `extensions.zotero.zbridge.token`. (3) Both READMEs rewrite the requirements table, setup steps, settings notes, limitations and architecture table, and the old illustrated Debug Bridge page is replaced by the ZBridge download page. The protocol is unchanged (raw JS in, JSON out), so an installed Debug Bridge can simply be removed |
 | 1.2.34 | 2026-11-04 | **Surviving a switch of Zotero library (profile / data directory)**: the edit-citation dialog no longer shows a screenful of "(item no longer in library)" — titles, authors and years come from the document's citation snapshot, tagged "not in current library · from document snapshot"; a new "Relink in library" matches by DOI (title as fallback) and repoints stale keys at the same item in the current library; switching the default form / narrative, refreshing the document and saving after an edit all absorb `no-items` and continue from the snapshot instead of failing. Item lookups now span every library, group libraries included. **Fixed whitespace being eaten around citations**: collapsing legacy duplicate markup matched the surrounding blanks too, so every re-render deleted one space and the text drifted to `TN[(Case et al. 2012)`; non-duplicate matches are now returned untouched, and blocks are no longer rewritten needlessly. **Fixed mixed numbering in the bibliography**: an entry missing from the current library is now restored from the snapshot text (it used to be replaced by a "(item no longer in Zotero)" placeholder, losing both the text and its number), and a final pass normalises the numbering form based on the live-rendered entries, so a leftover `(1)` from an older numeric style can no longer sit inside an unnumbered author-date list. **Fixed bibliography order after a library switch**: missing keys used to be appended to the end, turning an author-date list from alphabetical into "live first, missing last" (measured: 6 of 7 missing, the entry originally 4th pushed to the top); author-date now sorts by each entry's own text (one correct answer, and it heals tables broken earlier), numeric restores from the newly stored `bibOrder`. **Fixed web-entry citations drifting on every render**: authorless, yearless web entries render as `(*Title*, n.d.)`, and that asterisk made SiYuan split the link into three segments, so one citation became three and re-split on every pass; emphasis markers are now stripped from body citation text and the link stays a single segment (bibliography entries keep their italics) |
 | 1.2.33 | 2026-11-04 | **Citation snapshot**: the trimmed CSL data and last rendered text of every reference are stored in the document attribute `custom-zotero-bibsnap`, so an item missing from Zotero is restored from the previous text and named in the notification (no more silent empty text / dropped reference in a merged citation / empty `↗` row). The bibliography is now rebuilt in place, so an appendix written after the list is no longer swallowed into it. Re-rendering no longer throws `tree not found` toasts; citations inside lists, tables and headings stop being rewritten on every run; a just-inserted citation no longer stays unrendered; command-palette failures are reported. Added a 30-case automated test suite (idempotency / snapshot / missing item / undo / concurrency / 100-reference scale) |
