@@ -1,4 +1,4 @@
-# Zotero Cite (siyuan-plugin-zotero-cite) v1.2.37
+# Zotero Cite (siyuan-plugin-zotero-cite) v1.3.0
 
 **English** | [简体中文](./README.md)
 
@@ -27,6 +27,7 @@ Both the in-text citations — merged as `(Dela Cruz et al., 2026; Ge et al., 20
 | 2.9 Citation snapshot fallback | The trimmed CSL data of every reference plus its last rendered text are stored in a document attribute (~0.3 KB each). When an item is gone from Zotero, or missing on this machine after a sync, re-rendering restores the previous text and tells you exactly which keys it could not find |
 | 2.11 Active-document collection | While you work in a document the plugin keeps a temporary Zotero collection `【【Connected Documents】】 → <document title>` holding every item that document cites. Members follow your edits, the name follows renames, the collection is dissolved when the document closes (and the top-level collection with it once nothing is left). It only adds/removes items — your existing collection memberships are untouched |
 | 2.10 Only the blocks that changed | Blocks whose content is unchanged are not written at all — the same holds for citations inside lists, tables and headings; ten consecutive runs leave both content and block attributes untouched |
+| 2.12 Single-page / multi-page | Leave the root unset for the classic one-document-at-a-time behaviour; set a citation root and the whole document tree shares continuous numbering and one bibliography. Settings are grouped per book in collapsible blocks. See 7.7 |
 
 ## 3 Problems it solves in SiYuan
 
@@ -100,6 +101,7 @@ Repeating steps 1–5 is required on a new machine (the token lives in Zotero's 
 | Bibliography heading | Auto | "Auto" picks 参考文献 or References from the CSL style's language; choose "no heading" to output entries only and write the heading yourself; or type any custom text |
 | Citations carry links | on | Turn off for plain text; click-to-Zotero and the right-click menu stop working |
 | Active-document collection | on | Turn off to stop creating collections and to remove the ones this machine created. See 7.6 |
+| Multi-document management · grouped by book | none | One collapsible block per root document tree, holding that book's parameter (bibliography output). With no root configured everything runs in single-page mode. See 7.7 |
 
 When the style is missing the plugin **does not** quietly substitute another one and overwrite the whole document: the refresh is refused, not a single byte of the body changes, and the message names the missing style. This typically happens when SiYuan settings sync to a machine that lacks that `.csl`.
 
@@ -121,6 +123,10 @@ When the style is missing the plugin **does not** quietly substitute another one
 | 6.12 Right-click · Refresh Zotero citations in this document | Right-click an in-text citation → item 6, re-renders every citation and the bibliography with the current style | — |
 | 6.13 Right-click · Plugin settings… | Right-click an in-text citation → item 7, opens this plugin's settings page directly (no need to dig through the bazaar) | — |
 | 6.14 In-block right-click · Insert Zotero citation | Right-click inside any paragraph → "Insert Zotero citation", inserts the items currently selected in Zotero | — |
+| 6.15 Doc-tree menu · Zotero多文档设置 | Right-click a document in the left tree → parent item `Zotero多文档设置` → two submenu items | — |
+| 6.16 Multi-doc: set citation root | Command palette, search `多文档`; click inside a document first | unbound |
+| 6.17 Multi-doc: unset citation root | same as above | unbound |
+| 6.18 Multi-doc: set bibliography output | same as above | unbound |
 
 The right-click menu only works on **in-text citations**, and only affects the citation you clicked. The `[↗]` link on a bibliography entry does not open the menu — it is the jump-back-to-Zotero link. None of the menu items has a default shortcut; bind the matching commands in Settings → Keymap → Plugins if you want one.
 
@@ -270,6 +276,29 @@ Three limits on this path:
 - Turn it off in the settings panel to stop it and to remove the collections this machine created.
 - **Existing collections are renamed, not rebuilt**: the top level has been renamed three times (`WPS 活跃文档` → `【【活跃文档】】` → `【【Connected Document】】` → `【【Connected Documents】】`). The plugin recognises all three earlier names and renames them in place — child collections are not moved and no membership is lost.
 
+### 7.7 Single-page / multi-page unified management (1.3.0)
+
+**One model, two scopes.** Internally there is only one "scope". With no root document configured the scope is the current document and behaviour is identical to 1.2.37; once a root is configured the scope expands to the root plus every nested sub-document at any depth. There are no two renderers and only one parameter set.
+
+**Enable multi-page**: right-click the root document **in the left document tree** → "**Zotero多文档设置**" → "Set as citation root (multi-document)". Any insert, citation edit, refresh or style switch in that tree — including a grandchild document — re-renders the whole tree.
+
+> The document-tree menu adds **one parent item only** ("Zotero多文档设置") with both actions in its submenu. The editor's right-click menu has none of them (it keeps just "Insert Zotero citation"). If you cannot find them, search "多文档" in the command palette — all three entries are there.
+
+| Behaviour | Single-page | Multi-page |
+|---|---|---|
+| Citation numbers | continuous within the page | **continuous across the tree**: all documents are concatenated in tree order (parent first, depth-first) into one virtual document and sent to CSL once |
+| Bibliography location | end of the page | a designated output document; if none is set, a `Reference` sub-document is created under the root |
+| Old bibliographies in other sub-documents | — | removed by the plugin, one list for the whole book |
+| Snapshot / undo / active-document collection | attached to the page | attached to the root, one set per book |
+
+**Designate an output document**: right-click that document in the left document tree → "Zotero多文档设置" → "Set as bibliography output". To go back to automatic, use "Restore automatic Reference" in the settings panel.
+
+**Grouped per book**: Settings → Zotero Cite → "Multi-document management · grouped by book" shows one collapsible block per book. Each block holds only that book's parameter (where the bibliography goes); sub-document count and maximum depth are read-only, computed from its own document tree — books have different chapter hierarchies and need no configuration. Single-page mode stays globally uniform with simple settings; that area then reads "No citation root configured".
+
+**The generated `Reference` document**: the plugin **does not insert a second "参考文献 / References" heading** (the document title already is one), and it **keeps that document last among its siblings** on every refresh — after a newly created chapter pushes it into the middle, one refresh moves it back. A user-designated output document is never moved.
+
+> The generated `Reference` document is managed by the plugin. Do not write body text in it; citations placed there count towards the book-wide numbering.
+
 ## 8 Limitations
 
 1. **Hard dependency on Zotero + ZBridge** — without it the plugin does nothing; it is not self-contained
@@ -285,6 +314,9 @@ Three limits on this path:
 11. **The snapshot is a fallback, not a backup** — `custom-zotero-bibsnap` only keeps the fields needed for rendering, so it keeps old documents looking right but cannot push items back into Zotero, and it cannot restore abstracts, notes or PDFs. After switching libraries, "Relink in library" only helps for items that **already exist in the current library** (unique DOI / title match); if the paper is not there at all, nothing can help. Real recovery still means re-importing from a backup or library
 12. **Snapshot numbering is last time's** — with numeric styles `[n]` is assigned by CSL in document order, so a restored entry carries the previous number and may not match the current sequence; documents that never rendered successfully have no snapshot at all
 13. **The snapshot syncs with the document** — about 0.3 KB per reference (100 references ≈ 30 KB). It lands in the `.sy` file and travels with SiYuan sync, so citation-heavy documents carry a larger attribute value
+
+14. **Multi-page cleanup only recognises marked entries** — the plugin removes entries carrying the `custom-zotero-bib` attribute (created since 1.2.30) plus standard headings. For unmarked legacy tables from 1.2.29 or earlier, refresh that document once so the plugin takes ownership and marks the entries before switching to multi-page. Sibling documents follow SiYuan's file-tree order; if the file-tree API is unavailable the plugin falls back to document ID path order (≈ creation order)
+15. **Reordering is triggered by a refresh**: a newly created chapter temporarily pushes `Reference` into the middle; one `Refresh all Zotero citations` moves it back. The plugin does not hook document-creation events, so that creating a document never triggers a sync or a file-tree broadcast
 
 ---
 
@@ -327,6 +359,7 @@ MIT License © 2026 ttChen
 
 | Version | Date | Highlights |
 |---|---|---|
+| 1.3.0 | 2026-11-08 | **Single-page / multi-page unified management**. One scope model: with no root configured it behaves exactly like 1.2.37. Once a root is set, that document plus every nested sub-document is re-rendered together with continuous numbering across the whole tree (concatenated in tree order into one virtual document, sent to CSL once), one bibliography in a designated output document or an automatically created `Reference` sub-document, and old lists in other sub-documents removed. Snapshots, the undo stack and the active-document collection attach to the root; settings are grouped per book in collapsible blocks, while single-page mode stays globally uniform and simple. **Menus**: the document-tree context menu adds one parent item `Zotero多文档设置` with both actions in its submenu; the editor's right-click menu has none of them; three `多文档` command-palette entries are the fallback. **The generated `Reference` document** no longer gets a second 参考文献 / References heading (its document title already is one) and is kept last among its siblings on every refresh via `/api/filetree/reorderDocs` (a newly created chapter pushes it into the middle; one refresh moves it back; already-last is a no-op; a user-designated output document is never moved). **Four pitfalls fixed**: a freshly created document is not writable until kernel metadata is ready; a new Reference was duplicated because it had not entered the SQL index; `changeSort` and `moveDocsByID` cannot reorder siblings (`reorderDocs` with a string `position` can); the duplicate heading. **Verified**: 89/89 offline, 30/30 live, existing 34/34 + 78/78 + 35/35, `preflight.sh` green |
 | 1.2.37 | 2026-11-07 | **Top-level collection renamed to `【【Connected Documents】】`** (was `【【活跃文档】】`), in step with the WPS plugin. Older names are still recognised: `【【活跃文档】】`, the even older `WPS 活跃文档`, and the singular `【【Connected Document】】` used briefly before the final wording are all **renamed in place** — child collections are not moved, no membership is lost, and no duplicate tree is created. If several legacy names exist side by side, the newest one wins and the others are left untouched |
 | 1.2.36 | 2026-11-07 | **Active-document collection**: a temporary Zotero collection `【【活跃文档】】 → <document title>` holds every item the document cites, follows edits and renames, and is dissolved when the document closes (top level goes with the last one). Only `addItems` / `removeItems`, never touching existing memberships. Shared top level, so WPS plugin collections sit beside it. Can be turned off. **Four bugs found and fixed on the way**: (1) "is this document still open" was decided by a DOM selector that also matched already-destroyed editors (SiYuan strips the `protyle` class before removing the node), so closing a document never dissolved the collection; (2) a frontend reload destroys every protyle, which is not the user closing documents — guarded with a `beforeunload` flag; (3) the leftover sweep must first confirm at least one editor is rendered, otherwise it wiped the collections of documents open at that moment (hit in practice); (4) document titles are read through `getHPathByID` because `blocks.content` in SQL lags behind for a freshly created document |
 | 1.2.35 | 2026-11-06 | **Fully switched to ZBridge**: the plugin no longer depends on the Zotero Debug Bridge. (1) The default bridge URL is now ZBridge's native endpoint `http://127.0.0.1:23119/zbridge/execute`, with the token appended to the query automatically; a stored `/debug-bridge/execute` value is migrated once on upgrade (a hand-edited URL is left alone). (2) The bazaar card description, the dependency block in the settings panel, and the connection-failure / 401 messages all point at ZBridge (<https://github.com/taotaochen86/zbridge/releases/latest>) and `extensions.zotero.zbridge.token`. (3) Both READMEs rewrite the requirements table, setup steps, settings notes, limitations and architecture table, and the old illustrated Debug Bridge page is replaced by the ZBridge download page. The protocol is unchanged (raw JS in, JSON out), so an installed Debug Bridge can simply be removed |

@@ -146,6 +146,77 @@ const DOC_LEGACY_PARENTS = ["【【Connected Document】】", "【【活跃文�
 /** docId → {key, name} 映射，单独一个文件，不塞进 conf.json（免得设置被 pickSettings 过滤掉） */
 const DOCMAP_FILE = "docmap.json";
 
+/* ==================== 1.3.0 多文档作用域 ==================== */
+/** 作用域名：rootId → {bibDocId}。独立文件，不塞 conf.json（会被 pickSettings 过滤） */
+const SCOPE_FILE = "scopes.json";
+/** 未指定输出文档时自动生成的文献表文档名（用户 2026-11-08 拍板用 Reference） */
+const REF_DOC_TITLE = "Reference";
+
+/**
+ * 文档 ID 路径的前缀。'/a/b.sy' → '/a/b/'，根 '/a.sy' → '/a/'。
+ * ⚠️ 判子文档用 ID 路径前缀，不用 root_id/hpath 等值比较（04c #5）。
+ */
+function scopePathPrefix(p) {
+  const s = String(p || "").replace(/\.sy$/, "");
+  return s.replace(/\/$/, "") + "/";
+}
+
+/** docPath 是否落在 rootPath 这棵树里（不含 root 自己）。Conflicted 副本由调用方按标题排除。 */
+function isScopeDescendant(docPath, rootPath) {
+  const d = String(docPath || "");
+  const pfx = scopePathPrefix(rootPath);
+  return d !== String(rootPath || "") && d.indexOf(pfx) === 0;
+}
+
+/** 脏配置过滤：只认思源文档 ID 形态的 key，bibDocId 必须是字符串或空。 */
+function normalizeScopes(obj) {
+  const out = {};
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return out;
+  }
+  for (const k in obj) {
+    if (!/^\d{14}-[a-z0-9]{7}$/i.test(String(k))) {
+      continue;
+    }
+    const v = obj[k] || {};
+    out[String(k)] = { bibDocId: typeof v.bibDocId === "string" ? v.bibDocId : "" };
+  }
+  return out;
+}
+
+/** 深度优先、父在子前；同级按 path 字典序（≈创建顺序）。文件树真实顺序由 collectScopeDocIds 覆盖。 */
+function orderScopeDocs(rows, rootId) {
+  const list = (rows || []).filter((r) => r && r.id);
+  const root = list.find((r) => r.id === rootId);
+  const rootPath = root ? root.path : "";
+  const kids = list.filter((r) => r.id !== rootId && isScopeDescendant(r.path, rootPath));
+  kids.sort((a, b) => String(a.path) < String(b.path) ? -1 : (String(a.path) > String(b.path) ? 1 : 0));
+  return [rootId].concat(kids.map((r) => r.id));
+}
+
+/** 纯判定：docId 属于哪棵顶级树。多根命中取 path 最长（最里面那棵）。 */
+function scopeFromRows(rows, docId, scopes) {
+  const cfg = normalizeScopes(scopes);
+  const byId = {};
+  (rows || []).forEach((r) => { if (r && r.id) { byId[r.id] = r; } });
+  const cur = byId[docId];
+  let best = null;
+  let bestLen = -1;
+  Object.keys(cfg).forEach((rid) => {
+    const rr = byId[rid];
+    if (!rr) { return; }
+    const hit = (rid === docId) || (!!cur && isScopeDescendant(cur.path, rr.path));
+    if (hit && String(rr.path || "").length > bestLen) {
+      bestLen = String(rr.path || "").length;
+      best = rid;
+    }
+  });
+  if (!best) {
+    return { mode: "single", rootId: docId, bibDocId: "" };
+  }
+  return { mode: "multi", rootId: best, bibDocId: cfg[best].bibDocId || "" };
+}
+
 /** 思源文档 id 形如 20261031203523-ozf451t，后缀那 7 位才是人眼可辨的部分 */
 function docTailOf(docId) {
   const s = String(docId || "");
@@ -1722,6 +1793,11 @@ module.exports = class ZoteroCite extends Plugin {
     this._docSyncTimers = {};
     this._docColLog = [];
     await this.loadDocMap();
+    /* 1.3.0 多文档作用域配置 */
+    this._scopes = {};
+    this._scopeIndex = {};
+    this._knownDocs = {};   // 本插件刚建、SQL 还没索引到的文档
+    await this.loadScopes();
 
     /* 设置面板 */
     this.setting = new Setting({
@@ -1833,6 +1909,8 @@ module.exports = class ZoteroCite extends Plugin {
 
     /* 块内右键菜单 → 插入 Zotero 文献引用（与顶栏按钮、/zotero 等价） */
     this.bindContentMenu();
+    /* 1.3.0：左侧文档树右键 → 设顶级文档 / 设输出文档（用户真正会去右键的地方） */
+    this.bindDocTreeMenu();
 
     /* 拦截 zotero:// 链接点击，交给系统唤起 Zotero
        ⚠️ 思源的行内链接是 <span data-type="a" data-href="...">，没有 href 属性，
@@ -1955,6 +2033,38 @@ module.exports = class ZoteroCite extends Plugin {
       langKey: "cycleCiteFormat",
       hotkey: "",
       callback: () => this.cycleCiteFormat(),
+    });
+    /* 1.3.0 多文档：命令面板兜底入口。右键菜单万一被别的插件挡住，这里一定能用。
+       ⚠️ 用 langText 直接给中文，不往 i18n 里加键（省得中英两处漏一个）。 */
+    this.addCommand({
+      langKey: "setScopeRoot",
+      langText: "多文档：把当前文档设为引文顶级文档",
+      hotkey: "",
+      callback: () => {
+        const id = this.getDocId();
+        if (!id) { showMessage("请先在文档里点一下光标位置，再执行这个命令", 5000); return; }
+        this.setScopeRoot(id);
+      },
+    });
+    this.addCommand({
+      langKey: "unsetScopeRoot",
+      langText: "多文档：取消当前文档的引文顶级设置",
+      hotkey: "",
+      callback: () => {
+        const id = this.getDocId();
+        if (!id) { showMessage("请先在文档里点一下光标位置，再执行这个命令", 5000); return; }
+        this.unsetScopeRoot(id);
+      },
+    });
+    this.addCommand({
+      langKey: "setBibDoc",
+      langText: "多文档：把当前文档设为文献表输出文档",
+      hotkey: "",
+      callback: () => {
+        const id = this.getDocId();
+        if (!id) { showMessage("请先在文档里点一下光标位置，再执行这个命令", 5000); return; }
+        this.setBibDoc(id);
+      },
     });
     this.addCommand({
       langKey: "undoCite",
@@ -2282,6 +2392,387 @@ module.exports = class ZoteroCite extends Plugin {
     } catch (e) {
       console.warn("[zotero-cite] saveData(docmap) failed:", e && e.message ? e.message : e);
     }
+  }
+
+  /* ---------------- 1.3.0 多文档作用域 ---------------- */
+
+  async loadScopes() {
+    try {
+      const m = await this.loadData(SCOPE_FILE);
+      this._scopes = normalizeScopes(m);
+    } catch (e) {
+      this._scopes = {};
+    }
+    this._scopeIndex = {};
+  }
+
+  async saveScopes() {
+    try {
+      await this.saveData(SCOPE_FILE, this._scopes || {});
+    } catch (e) {
+      console.warn("[zotero-cite] saveData(scopes) failed:", e && e.message ? e.message : e);
+    }
+  }
+
+  /** 非 async 调用点用：从上次 resolveScope 建好的内存索引里找顶级文档 */
+  scopeRootIdSync(docId) {
+    const d = String(docId || "");
+    return (this._scopeIndex && this._scopeIndex[d]) || d;
+  }
+
+  /** 一次 SQL 拿全库文档元数据。显式 LIMIT 绕开默认 64 行（04c #3） */
+  async allDocRows() {
+    let rows = [];
+    try {
+      const r = await fetchSyncPost("/api/query/sql", {
+        stmt: "SELECT id, path, hpath, content, box FROM blocks WHERE type='d' LIMIT 1000",
+      });
+      rows = (r && r.data) || [];
+    } catch (e) {
+      rows = [];
+    }
+    /*
+     * 刚由本插件新建的 Reference 文档 SQL 查不到（04c #7 索引延迟）。
+     * 不并进来的话，下一次 resolveScope 会认为「输出文档不存在」而再建一个同名文档：
+     * 2026-11-08 真机实测一轮重排建出两篇 Reference，文献表写进前一篇、
+     * 后一篇空白，表现就是「文献表没生成」。
+     */
+    const seen = new Set(rows.map((x) => x && x.id));
+    const known = this._knownDocs || {};
+    Object.keys(known).forEach((id) => { if (!seen.has(id)) { rows.push(known[id]); } });
+    return rows;
+  }
+
+  /**
+   * 按思源真实文档树顺序（深度优先、父在子前）收集 root 及所有层级后代。
+   * 主通道 listDocsByPath（实时、甩掉 SQL 索引滞后 04c #7）；不可用退回 SQL path 前缀。
+   */
+  async collectScopeDocIds(rootRow, rowMap) {
+    const out = [rootRow.id];
+    const seen = new Set(out);
+    const box = rootRow.box;
+    const pfx = scopePathPrefix(rootRow.path);
+    let apiOk = false;
+    const walk = async (parentPath) => {
+      if (!parentPath || seen.size > 500) { return; }
+      const r = await apiQuiet("/api/filetree/listDocsByPath", { notebook: box, path: parentPath });
+      const files = (r && r.data && r.data.files) || [];
+      if (r && r.code === 0) { apiOk = true; }
+      for (const f of files) {
+        if (!f || !f.id || seen.has(f.id)) { continue; }
+        if (/\(Conflicted/i.test(String(f.name || ""))) { continue; } // 04c #12
+        seen.add(f.id);
+        out.push(f.id);
+        if (Number(f.subFileCount) > 0 && f.path) { await walk(f.path); }
+      }
+    };
+    try { await walk(rootRow.path); } catch (e) { /* 落到 SQL 兜底 */ }
+    const extraIds = Object.keys(rowMap)
+      .filter((id) => !seen.has(id) && String((rowMap[id] || {}).path || "").indexOf(pfx) === 0)
+      .filter((id) => !/\(Conflicted/i.test(String((rowMap[id] || {}).content || "")));
+    if (!apiOk) {
+      extraIds.sort((a, b) => String(rowMap[a].path) < String(rowMap[b].path) ? -1 : 1);
+    }
+    extraIds.forEach((id) => { seen.add(id); out.push(id); });
+    return out;
+  }
+
+  /**
+   * 未指定输出文档：复用顶级文档下已存在的直接子文档 Reference，否则新建。
+   * ⚠️ createDocWithMd 的 path 必须是人类可读 hpath，传 ID 路径会造垃圾目录（04c #4）。
+   */
+  async ensureReferenceDoc(rootId, rowMap) {
+    const root = rowMap[rootId] || {};
+    const pfx = scopePathPrefix(root.path);
+    const hit = Object.keys(rowMap).find((id) => {
+      const r = rowMap[id];
+      return r && String(r.content || "").trim() === REF_DOC_TITLE &&
+        String(r.path || "").indexOf(pfx) === 0 &&
+        String(r.path || "").slice(pfx.length).indexOf("/") < 0;
+    });
+    if (hit) { return hit; }
+    let hpath = "";
+    try {
+      const r = await apiQuiet("/api/filetree/getHPathByID", { id: rootId });
+      hpath = String((r && r.data) || "");
+    } catch (e) { /* 读不到就不冒险建文档 */ }
+    if (!hpath || !root.box) { return ""; }
+    const r = await apiQuiet("/api/filetree/createDocWithMd", {
+      notebook: root.box,
+      path: hpath.replace(/\/$/, "") + "/" + REF_DOC_TITLE,
+      markdown: "",
+    });
+    const made = r && r.data ? String(r.data) : "";
+    if (made) {
+      /*
+       * ⚠️ 新建文档的内核元数据有短暂延迟（04c #7，zc_lib.new_doc 也踩过）：
+       *    不等就紧接着 appendBlock，会报 "document metadata is not ready"，
+       *    文献表第一次写不进去，要等下一次重排才补上（2026-11-08 真机实测）。
+       *    getChildBlocks 读内存块树，返回数组即代表文档可写。
+       */
+      for (let i = 0; i < 20; i++) {
+        const q = await apiQuiet("/api/block/getChildBlocks", { id: made });
+        if (q && q.code === 0 && Array.isArray(q.data)) { break; }
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      // 新建文档 SQL 有索引延迟，登记进本次 rowMap 与实例级缓存，供后续 resolveScope 复用
+      rowMap[made] = { id: made, path: pfx + made + ".sy", hpath: "", content: REF_DOC_TITLE, box: root.box };
+      this._knownDocs = this._knownDocs || {};
+      this._knownDocs[made] = rowMap[made];
+    }
+    return made;
+  }
+
+  /**
+   * 1.3.0：让自动生成的 Reference 文档始终排在该书同级子文档的最后。
+   *
+   * 思源新建文档默认接在同级末尾，会把 Reference 挤到中间（用户 2026-11-08 23:47 实测：
+   * 新建「未命名文档」后 Reference 从 sort 4 变成倒数第二）。
+   * /api/filetree/reorderDocs 是前端拖放排序用的同一个内核 API，实测可用载荷：
+   *   { sourceIDs: [refId], targetID: <同级最后一个其它文档>, position: "after" }
+   * ⚠️ position 只认字符串 "before" / "after"，不是布尔 after；
+   * ⚠️ 已经在最后就直接返回，不重复调用（幂等，避免每轮重排都触发云同步与 ws 广播）。
+   */
+  async ensureReferenceLast(rootRow, refId) {
+    if (!rootRow || !rootRow.box || !rootRow.path || !refId || rootRow.id === refId) {
+      return false;
+    }
+    try {
+      const r = await apiQuiet("/api/filetree/listDocsByPath", {
+        notebook: rootRow.box,
+        path: rootRow.path,
+      });
+      const files = (r && r.data && r.data.files) || [];
+      if (files.length && files[files.length - 1].id === refId) { return false; }
+      const others = files.filter((f) => f && f.id && f.id !== refId &&
+        !/\(Conflicted/i.test(String(f.name || "")));
+      if (!others.length) { return false; }
+      const q = await apiQuiet("/api/filetree/reorderDocs", {
+        sourceIDs: [refId],
+        targetID: others[others.length - 1].id,
+        position: "after",
+      });
+      return !!(q && q.code === 0);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 当前文档 → 作用域。空配置时零 API 调用，保证单文档路径与 1.2.37 等价。 */
+  async resolveScope(docId) {
+    const d = String(docId || "");
+    const single = () => ({ mode: "single", rootId: d, docIds: [d], bibDocId: d });
+    if (!d || !this._scopes || !Object.keys(this._scopes).length) { return single(); }
+    const rows = await this.allDocRows();
+    const rowMap = {};
+    rows.forEach((r) => { if (r && r.id) { rowMap[r.id] = r; } });
+    const hit = scopeFromRows(rows, d, this._scopes);
+    if (hit.mode !== "multi" || !rowMap[hit.rootId]) { return single(); }
+    let docIds = await this.collectScopeDocIds(rowMap[hit.rootId], rowMap);
+    let bibDocId = hit.bibDocId;
+    if (!bibDocId || !rowMap[bibDocId]) {
+      bibDocId = await this.ensureReferenceDoc(hit.rootId, rowMap);
+      if (bibDocId) {
+        this._scopes[hit.rootId] = Object.assign({}, this._scopes[hit.rootId], { bibDocId });
+        await this.saveScopes();
+      }
+    }
+    if (!bibDocId) { bibDocId = hit.rootId; } // 建不出来就退回顶级文档，绝不把文献表写丢
+    if (docIds.indexOf(bibDocId) < 0) { docIds = docIds.concat([bibDocId]); }
+    this._scopeIndex = this._scopeIndex || {};
+    docIds.forEach((id) => { this._scopeIndex[id] = hit.rootId; });
+
+    /* 自动生成的 Reference 保持同级最后（用户另行指定的输出文档不动） */
+    const refRow = rowMap[bibDocId] || (this._knownDocs && this._knownDocs[bibDocId]) || {};
+    if (String(refRow.content || "").trim() === REF_DOC_TITLE) {
+      await this.ensureReferenceLast(rowMap[hit.rootId], bibDocId);
+    }
+    return { mode: "multi", rootId: hit.rootId, docIds: docIds, bibDocId: bibDocId };
+  }
+
+  async setScopeRoot(docId) {
+    this._scopes = this._scopes || {};
+    this._scopes[String(docId)] = { bibDocId: "" };
+    await this.saveScopes();
+    showMessage("已设为引文顶级文档：这篇及其所有嵌套子文档的引文将统一管理", 5000);
+  }
+
+  async unsetScopeRoot(docId) {
+    this._scopes = this._scopes || {};
+    delete this._scopes[String(docId)];
+    await this.saveScopes();
+    showMessage("已取消引文顶级文档，恢复单文档模式", 4000);
+  }
+
+  /** 指定输出文档。直接走纯判定，不调 resolveScope —— 免得先建出一个 Reference 文档。 */
+  async setBibDoc(docId) {
+    const rows = await this.allDocRows();
+    const hit = scopeFromRows(rows, String(docId), this._scopes || {});
+    if (hit.mode !== "multi") {
+      showMessage("请先在顶级文档上右键「设为引文顶级文档」，再指定输出文档", 6000);
+      return;
+    }
+    this._scopes[hit.rootId] = Object.assign({}, this._scopes[hit.rootId], { bibDocId: String(docId) });
+    await this.saveScopes();
+    showMessage("已设为文献列表输出文档；执行一次「重排全文」生效", 5000);
+  }
+
+  /** 设置面板里的只读状态说明（右键操作，不占 data-k，不进 settings） */
+  scopeSettingStat() {
+    const roots = Object.keys(this._scopes || {});
+    if (!roots.length) {
+      return "当前没有设置引文顶级文档 —— 全部按单文档模式运行，与旧版完全一致。" +
+        "在任意文档里右键 →「设为引文顶级文档」后，该文档及所有嵌套子文档的引文统一管理、" +
+        "编号全树连续；文献表只输出到一个文档，未指定则自动建 Reference 子文档。";
+    }
+    const assigned = roots.filter((r) => this._scopes[r] && this._scopes[r].bibDocId).length;
+    return "已设 " + roots.length + " 个引文顶级文档；其中 " + assigned +
+      " 个已指定文献表输出文档，其余自动输出到 Reference 子文档。";
+  }
+
+
+  /**
+   * 1.3.0 设置面板：一本书一个 <details> 折叠块，块内只放这一本书的参数。
+   * 参数刻意保持简单（只有「文献表输出到哪」一项可改），层级/子文档数只读展示 ——
+   * 不同书籍的章节层次本来就不一样，由文档树自动算，不需要用户配。
+   */
+  async fillScopeGroups(root) {
+    const box = root && root.querySelector("[data-scope-groups]");
+    if (!box) { return; }
+    const ids = Object.keys(this._scopes || {});
+    if (!ids.length) {
+      box.innerHTML = '<div class="zc-scope-empty">尚未设置引文顶级文档 —— 全部按单文档模式运行，与旧版一致。</div>';
+      return;
+    }
+    let docRows = [];
+    try { docRows = await this.allDocRows(); } catch (e) { docRows = []; }
+    const map = {};
+    docRows.forEach((r) => { if (r && r.id) { map[r.id] = r; } });
+    const esc = (s) => String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    box.innerHTML = ids.map((rid, i) => {
+      const cfg = this._scopes[rid] || {};
+      const selfRow = map[rid] || {};
+      const title = esc(String(selfRow.content || rid));
+      const pfx = scopePathPrefix(selfRow.path || "");
+      const baseSeg = String(selfRow.path || "").split("/").length;
+      let kids = 0;
+      let depth = 1;
+      Object.keys(map).forEach((id) => {
+        const p = String((map[id] || {}).path || "");
+        if (p.indexOf(pfx) !== 0 || /\(Conflicted/i.test(String((map[id] || {}).content || ""))) { return; }
+        kids++;
+        depth = Math.max(depth, p.split("/").length - baseSeg + 1);
+      });
+      const outTitle = cfg.bibDocId
+        ? esc(String((map[cfg.bibDocId] || {}).content || cfg.bibDocId)) : "";
+      return `<details class="zc-scope-group" data-root="${esc(rid)}" ${i === 0 ? "open" : ""}>
+        <summary><span class="zc-scope-name">${title}</span>
+          <span class="zc-scope-meta">${kids} 篇子文档 · 最深 ${depth} 层</span></summary>
+        <div class="zc-scope-body">
+          <div class="zc-scope-row"><span>文献表输出</span><b>${outTitle || "自动 → Reference 子文档"}</b></div>
+          <div class="zc-scope-row"><span>顶级文档 ID</span><code>${esc(rid)}</code></div>
+          <div class="zc-scope-acts">
+            ${cfg.bibDocId ? '<button class="b3-button b3-button--outline zc-scope-clearout">恢复自动 Reference</button>' : ''}
+            <button class="b3-button b3-button--outline zc-scope-drop">取消这本的顶级设置</button>
+          </div>
+        </div>
+      </details>`;
+    }).join("");
+    box.querySelectorAll(".zc-scope-group").forEach((el) => {
+      const rid = el.getAttribute("data-root");
+      const clear = el.querySelector(".zc-scope-clearout");
+      if (clear) {
+        clear.addEventListener("click", async () => {
+          this._scopes[rid] = Object.assign({}, this._scopes[rid], { bibDocId: "" });
+          await this.saveScopes();
+          await this.fillScopeGroups(root);
+          showMessage("已恢复自动 Reference；执行一次「重排全文」生效", 4000);
+        });
+      }
+      const drop = el.querySelector(".zc-scope-drop");
+      if (drop) {
+        drop.addEventListener("click", async () => {
+          await this.unsetScopeRoot(rid);
+          await this.fillScopeGroups(root);
+        });
+      }
+    });
+  }
+  /**
+   * 原重排步骤 2 的多文档版：对每个文档分别取块，排除各文档自己的文末文献表块。
+   * SQL 有索引延迟，getChildBlocks 读内存块树补一遍（交接坑 9）。
+   */
+  async collectBlocksForDocs(docIds, heading) {
+    const blocks = [];
+    for (const docId of docIds) {
+      const bibIds = new Set();
+      try {
+        const loc = await this.locateBib(docId, heading);
+        loc.entries.forEach((c) => bibIds.add(c.id));
+        if (loc.headingIndex >= 0 && loc.children[loc.headingIndex]) {
+          bibIds.add(loc.children[loc.headingIndex].id);
+        }
+      } catch (e) { /* 取不到就按没有文末处理 */ }
+      const rowsSql = await this.querySql(
+        `SELECT id FROM blocks WHERE root_id='${docId}' AND type IN ('p','h','l','i','b','s','t') ORDER BY sort`
+      );
+      const seenIds = new Set((rowsSql || []).map((r) => r.id));
+      let rows = rowsSql || [];
+      try {
+        const kids = ((await apiQuiet("/api/block/getChildBlocks", { id: docId })) || {}).data || [];
+        const extra = kids
+          .filter((k) => k && k.id && !seenIds.has(k.id) && /^(p|h|l|i|b|s|t)$/.test(k.type || ""))
+          .map((k) => ({ id: k.id }));
+        if (extra.length) { rows = rows.concat(extra); }
+      } catch (e) { /* 补不到就按 SQL 结果走 */ }
+      const batch = 20;
+      for (let i = 0; i < rows.length; i += batch) {
+        const slice = rows.slice(i, i + batch).filter((row) => !bibIds.has(row.id));
+        const got = await Promise.all(slice.map((row) =>
+          fetchSyncPost("/api/block/getBlockKramdown", { id: row.id }).catch(() => null)
+        ));
+        got.forEach((r, j) => {
+          const row = slice[j];
+          if (!row || !r) { return; }
+          const kdRaw = r.data && r.data.kramdown;
+          const kd = kdRaw ? collapseCiteMarkup(unwrapCiteSups(kdRaw)) : kdRaw;
+          if (!kd || !/zotero:\/\/select\/library\/items\//.test(kd)) { return; }
+          blocks.push({ id: row.id, kdRaw: kdRaw, kd: kd });
+        });
+      }
+    }
+    return blocks;
+  }
+
+  /** 清掉非输出文档的旧文献表：只删带标记的新版条目 + 插件标准标题，绝不碰用户正文 */
+  async clearBibliography(docId) {
+    const heading = resolveBibHeading(this.settings, null);
+    let loc;
+    try { loc = await this.locateBib(docId, heading); } catch (e) { return 0; }
+    const ids = [];
+    if (loc.marked) { loc.entries.forEach((c) => ids.push(c.id)); }
+    if (loc.headingIndex >= 0 && loc.children[loc.headingIndex]) {
+      const h = loc.children[loc.headingIndex];
+      const txt = String(h.content || "").trim();
+      if (LEGACY_BIB_HEADINGS.indexOf(txt) >= 0 || (heading && txt === heading)) { ids.push(h.id); }
+    }
+    if (!ids.length) { return 0; }
+    try {
+      const r = await apiQuiet("/api/transactions", {
+        transactions: [{ doOperations: ids.map((id) => ({ action: "delete", id: id })) }],
+        reqId: Date.now(),
+      });
+      if (!r || r.code !== 0) { throw new Error("tx failed"); }
+    } catch (e) {
+      for (const id of ids) { await apiQuiet("/api/block/deleteBlock", { id: id }); }
+    }
+    await apiQuiet("/api/attr/setBlockAttrs", {
+      id: docId,
+      attrs: { "custom-zotero-bibhash": "", "custom-zotero-bibheading": "" },
+    });
+    return ids.length;
   }
 
   /** 统一入口：把 payload 补上顶级名与旧名，再交给 ZBridge 执行 */
@@ -2899,7 +3390,7 @@ module.exports = class ZoteroCite extends Plugin {
     }
     // 落盘前记一步撤销（改形态、增删条目都走这里）
     await this.snapBlocks(
-      (anchor && anchor.docId) || this.getDocId(),
+      this.scopeRootIdSync((anchor && anchor.docId) || this.getDocId()),
       [{ id: anchor.blockId, kd: kdRaw }],
       "修改引用"
     );
@@ -3012,6 +3503,8 @@ module.exports = class ZoteroCite extends Plugin {
    * 正文右键菜单里加「插入 Zotero 文献引用」。
    *
    * open-menu-content = 在块内文字上右键弹出的那个原生菜单（点块标那个入口是 click-blockicon）。
+   * ⚠️ 1.3.0：多文档的「设顶级 / 设输出文档」只放左侧文档树右键（open-menu-doctree），
+   *    **这里一律不加** —— 用户 2026-11-08 明确要求编辑器正文右键不出现这两项。
    * ⚠️ 两个必须：
    *   1) 菜单项要在同一个 tick 里加完，中间不能 await（菜单已经渲染了）；
    *   2) 必须加在**主菜单实例**上，不能用 detail.menu —— 那是思源临时造的子菜单，
@@ -3044,6 +3537,63 @@ module.exports = class ZoteroCite extends Plugin {
         /* 菜单 API 若改版，最多少这一项，不影响插入/右键引用等主功能 */
       }
     });
+  }
+
+  /* ---------------- 1.3.0 文档树右键菜单 ---------------- */
+
+  bindDocTreeMenu() {
+    this.eventBus.on("open-menu-doctree", (e) => this.onDocTreeMenu(e));
+  }
+
+  /**
+   * 左侧文档树右键。用户说「在书的顶级文档上右键」，指的就是这里
+   * （不是编辑器正文的 open-menu-content）。
+   *
+   * ⚠️ 三个实测口径（照抄工作区里已跑熟的 share-site / doc-num 两个插件）：
+   *   1) detail.elements[0] 是选中的树节点，文档节点形如 li[data-type="navigation-file"]，
+   *      文档 ID 在 data-node-id；笔记本节点是 navigation-root 且 data-node-id 为空，不给菜单；
+   *   2) 菜单项必须**同步**挂上，click 回调里再去 await 没问题，但注册本身不能 await，
+   *      否则菜单已经渲染完，项就不会出现；
+   *   3) 文档树菜单直接用 detail.menu.addItem() 即可，不像 open-menu-content 那样
+   *      需要 mainMenuOf() 绕开思源临时造的子菜单。
+   */
+  onDocTreeMenu(e) {
+    const d = (e && e.detail) || {};
+    if (!d.menu || !d.elements || !d.elements.length) { return; }
+    const el = d.elements[0];
+    const node = (el && el.closest && el.closest("li[data-type]")) || el;
+    if (!node || !node.getAttribute) { return; }
+    if (String(node.getAttribute("data-type") || "").toLowerCase() !== "navigation-file") { return; }
+    const docId = String(node.getAttribute("data-node-id") || "");
+    if (!/^\d{14}-[a-z0-9]{7}$/i.test(docId)) { return; }
+    const isRoot = !!(this._scopes && this._scopes[docId]);
+    /*
+     * 用户 2026-11-08 23:36 定稿：文档树右键只留一个父项「Zotero多文档设置」，
+     * 两项收进 submenu 变成二级项，不占一级菜单位置。
+     * 子项固定两条：第一条按状态在「设为 / 取消顶级」之间切换；
+     * 第二条始终给（已是顶级时也可能想改输出文档），不在树内时 setBibDoc 自己会提示。
+     */
+    try {
+      d.menu.addItem({
+        icon: "iconSettings",
+        label: "Zotero多文档设置",
+        submenu: [
+          {
+            icon: isRoot ? "iconClose" : "iconFolder",
+            label: isRoot ? "取消「引文顶级文档」" : "设为引文顶级文档（多文档统一管理）",
+            click: () => {
+              if (isRoot) { this.unsetScopeRoot(docId); }
+              else { this.setScopeRoot(docId); }
+            },
+          },
+          {
+            icon: "iconFile",
+            label: "设为文献列表输出文档",
+            click: () => { this.setBibDoc(docId); },
+          },
+        ],
+      });
+    } catch (err) { /* 菜单 API 若改版，最多少这一项，命令面板仍可用 */ }
   }
 
   closeCiteMenu() {
@@ -3163,7 +3713,7 @@ module.exports = class ZoteroCite extends Plugin {
        */
       if (!rec || (fmt === "narr" && !(rec.np && rec.np.length))) {
         const docId = (anchor && anchor.docId) || this.getDocId();
-        const snap = docId ? await readSnapshot(docId) : null;
+        const snap = docId ? await readSnapshot(this.scopeRootIdSync(docId)) : null;
         const prev = pickCluster(snap && snap.clusters, keys);
         if (prev && prev.c) {
           rec = { c: prev.c, np: prev.np || [] };
@@ -3199,7 +3749,7 @@ module.exports = class ZoteroCite extends Plugin {
      * 那时这张存档就是唯一还能说清「这几条原本是哪几篇」的东西 —— 必须读它，
      * 否则整屏都是「(该条目已不在库里)」。
      */
-    const snap = docId ? await readSnapshot(docId) : null;
+    const snap = docId ? await readSnapshot(this.scopeRootIdSync(docId)) : null;
     const snapRec = (k) => (snap && snap.items && snap.items[k]) || null;
 
     let metas = [];
@@ -3646,7 +4196,7 @@ module.exports = class ZoteroCite extends Plugin {
 
   /** 撤销最近一次 Zotero 引用操作 */
   async undoLast() {
-    let docId = this.getDocId();
+    let docId = this.scopeRootIdSync(this.getDocId());
     // 当前文档没有记录时，回落到「最近一次操作过的那篇」，别让用户切个标签就撤不动
     const hasStack = (id) => !!(id && this._undoStack[id] && this._undoStack[id].length);
     if (!hasStack(docId)) {
@@ -3754,19 +4304,43 @@ module.exports = class ZoteroCite extends Plugin {
     this._refreshLock = prevLock.then(() => myLock);
     await prevLock;
     try {
-      return await this._refreshDocumentNow(verbose, docId, styleIdBefore);
+      /*
+       * 1.3.0：按作用域分流。没配任何顶级文档时 resolveScope 零 API 调用，
+       * 单文档路径与 1.2.37 完全等价（zc_test.py 34/34 是判据）。
+       */
+      let scope = null;
+      try {
+        const s = await this.resolveScope(docId);
+        if (s && s.mode === "multi") { scope = s; }
+      } catch (e) { /* 作用域解析失败就退回单文档，不让重排整体失效 */ }
+      return await this._refreshDocumentNow(verbose, docId, styleIdBefore, scope);
     } finally {
       release();
     }
   }
 
-  async _refreshDocumentNow(verbose, docId, styleIdBefore) {
+  async _refreshDocumentNow(verbose, docId, styleIdBefore, scope) {
+    /*
+     * 1.3.0 作用域：单文档时 rootId = docIds[0] = bibDocId = docId，
+     * 下面每一步都退化为 1.2.37 的原逻辑；多文档时按文档树顺序聚合。
+     */
+    const rootId = (scope && scope.rootId) || docId;
+    const docIds = (scope && scope.docIds && scope.docIds.length) ? scope.docIds : [docId];
+    const bibDocId = (scope && scope.bibDocId) || docId;
     // 撤销帧里要记「这次渲染之前用的样式」：优先用调用方传的，
     // 否则用上一次实际渲染时用的样式（切样式时 settings 已经改过，不能直接取当前值）。
     const undoStyle = styleIdBefore || this._styleBeforeChange || this._lastStyleId || this.settings.styleId;
     // 1. 取全文 markdown（用来定顺序；后续逐块改写）
-    const mdResp = await fetchSyncPost("/api/export/exportMdContent", { id: docId });
-    const fullMd = (mdResp && mdResp.data && mdResp.data.content) || "";
+    /*
+     * 1.3.0：多文档按树顺序拼成一份虚拟全文，一次送 CSL 渲染 → 编号全局连续。
+     * ⚠️ 用 \n\n 分隔：groupCites 的 gap 只认 [ \t\u200b…]，换行能阻止
+     *    「A 文档末尾的引用」与「B 文档开头的引用」被误合并成一处（交接坑 12/13）。
+     */
+    let fullMd = "";
+    for (const oneId of docIds) {
+      const mdResp = await fetchSyncPost("/api/export/exportMdContent", { id: oneId });
+      fullMd += ((mdResp && mdResp.data && mdResp.data.content) || "") + "\n\n";
+    }
     // 代码块里的示例链接不算引用
     const scan = scanCites(maskCode(fullMd).s, this.settings.defaultFormat);
     if (!scan.keys.length) {
@@ -3780,69 +4354,13 @@ module.exports = class ZoteroCite extends Plugin {
     //    ⚠️ 顺序很重要：clusters 必须同时覆盖「全文分组」和「每块分组」。
     //       只按全文分组会漏 —— 全文导出与块内 kramdown 在换行/零宽字符上不完全一致，
     //       一旦块内分组结果不在 clusters 里，渲染取不到，正文就会变成 `[?]`。
-    const rowsSql = await this.querySql(
-      `SELECT id FROM blocks WHERE root_id='${docId}' AND type IN ('p','h','l','i','b','s','t') ORDER BY sort`
-    );
     /*
-     * ⚠️ 文末参考文献块必须排除在「改写」之外。
+     * ⚠️ 文末参考文献块必须排除在「改写」之外，逐文档的排除在 collectBlocksForDocs 里做。
      * 它们稍后会被 rebuildBibliography 整段删掉重建，如果这里也改写、也进撤销快照：
      *   · 每次重排都白写一遍（表现为 always updated N）；
      *   · 撤销时拿已被删除的块 id 去写，每块报一次 "block not found"，满屏提示。
      */
-    const bibIds = new Set();
-    try {
-      // 定位逻辑与 rebuildBibliography 共用一份，避免两处对「哪一段是文末」判断不一致
-      const loc = await this.locateBib(docId, resolveBibHeading(this.settings, null));
-      loc.entries.forEach((c) => bibIds.add(c.id));
-      if (loc.headingIndex >= 0 && loc.children[loc.headingIndex]) {
-        bibIds.add(loc.children[loc.headingIndex].id);
-      }
-    } catch (e) { /* 取不到就按没有文末处理 */ }
-
-    /*
-     * ⚠️ SQL 有索引延迟：刚插进去的块常常还查不到（实测新加一段后 0.8 秒仍为 0 行，
-     *    新建文档更慢）。只信 SQL 就会漏掉「用户刚插入的那条引用」—— 表现为
-     *    重排报告扫到 N 条、却 updated 0，新引用一直停在 [pending]/原文字上。
-     *    这里再用 getChildBlocks 补一遍：它读的是内存块树，没有索引延迟。
-     *    顺序上 SQL 结果在前、补的在后；渲染是按 cluster 键查表，与块顺序无关，
-     *    真正决定编号顺序的是全文 markdown 的分组结果，所以这样补不会打乱编号。
-     */
-    const seenIds = new Set(rowsSql.map((r) => r.id));
-    let rows = rowsSql;
-    try {
-      const kids = ((await fetchSyncPost("/api/block/getChildBlocks", { id: docId })) || {}).data || [];
-      const extra = kids
-        .filter((k) => k && k.id && !seenIds.has(k.id) && /^(p|h|l|i|b|s|t)$/.test(k.type || ""))
-        .map((k) => ({ id: k.id }));
-      if (extra.length) {
-        rows = rowsSql.concat(extra);
-      }
-    } catch (e) { /* 补不到就按 SQL 结果走 */ }
-
-    const blocks = [];
-    {
-      // 并发读：串行读 300 块要 0.7 秒以上，分批并发后每批只有一次往返的延迟
-      const batch = 20;
-      for (let i = 0; i < rows.length; i += batch) {
-        const slice = rows.slice(i, i + batch).filter((row) => !bibIds.has(row.id));
-        const got = await Promise.all(slice.map((row) =>
-          fetchSyncPost("/api/block/getBlockKramdown", { id: row.id }).catch(() => null)
-        ));
-        got.forEach((r, j) => {
-          const row = slice[j];
-          if (!row || !r) {
-            return;
-          }
-          const kdRaw = r.data && r.data.kramdown;
-          // 先合并历史残留（可能有多份叠加），再剥上标外壳，最后按当前样式重建
-          const kd = kdRaw ? collapseCiteMarkup(unwrapCiteSups(kdRaw)) : kdRaw;
-          if (!kd || !/zotero:\/\/select\/library\/items\//.test(kd)) {
-            return;
-          }
-          blocks.push({ id: row.id, kdRaw: kdRaw, kd: kd });
-        });
-      }
-    }
+    const blocks = await this.collectBlocksForDocs(docIds, resolveBibHeading(this.settings, null));
 
     // 3. 每处引用算一个 cluster，按正文顺序交给 CSL 渲染。
     //    文本完全由样式决定，插件不拼括号、不算编号；链接结构不动（仍是 ?zkeys=&f=）。
@@ -3890,7 +4408,7 @@ module.exports = class ZoteroCite extends Plugin {
      *   · 正文合并引用 → 恢复上次那一处的完整文本，不再静默少一条。
      * 快照是「上次成功重排」留下的，数据永远来自本机曾经真实存在过的条目。
      */
-    const prevSnap = await readSnapshot(docId);
+    const prevSnap = await readSnapshot(rootId);
     const renderedKeys = new Set(rendered.order || []);
     const missingKeys = scan.keys.filter((k) => !renderedKeys.has(k));
     /*
@@ -4017,7 +4535,7 @@ module.exports = class ZoteroCite extends Plugin {
       }
     }
     if (todo.length) {
-      await this.snapBlocks(docId, todo.map(t => ({ id: t.id, kd: t.oldKd })), "重排/切换样式", undoStyle);
+      await this.snapBlocks(rootId, todo.map(t => ({ id: t.id, kd: t.oldKd })), "重排/切换样式", undoStyle);
       for (const t of todo) {
         /*
          * 容错：块可能在这轮里被别的东西改掉（编辑器重建块 id、另一窗口在编辑…）。
@@ -4037,7 +4555,14 @@ module.exports = class ZoteroCite extends Plugin {
     }
 
     // 4. 重建文末参考文献表（顺序与编号全部交给样式自己决定）
-    await this.rebuildBibliography(docId, scan.keys, rendered);
+    //    1.3.0 多文档：只在输出文档留一份，其余子文档原有的旧表清掉（用户 2026-11-08 拍板）
+    if (scope && scope.mode === "multi") {
+      for (const oneId of docIds) {
+        if (oneId !== bibDocId) { await this.clearBibliography(oneId); }
+      }
+    }
+    await this.rebuildBibliography(bibDocId, scan.keys, rendered, rootId,
+      !!(scope && scope.mode === "multi"));
 
     /*
      * 5. 落文档属性：引用 key 清单 + 样式 + 快照。
@@ -4097,7 +4622,7 @@ module.exports = class ZoteroCite extends Plugin {
       const fmtCount = {};
       scan.hits.forEach(h => { fmtCount[h.fmt] = (fmtCount[h.fmt] || 0) + 1; });
       await fetchSyncPost("/api/attr/setBlockAttrs", {
-        id: docId,
+        id: rootId,
         attrs: {
           "custom-zotero-cites": scan.keys.join(","),
           "custom-zotero-style": this.settings.styleId,
@@ -4130,7 +4655,7 @@ module.exports = class ZoteroCite extends Plugin {
      * 把这篇文档引用到的文献同步进 Zotero 的「【【Connected Documents】】→ 文档名」集合。
      * 放在最后、失败不影响主流程：Zotero 没开只是这次没同步，重排本身已经做完了。
      */
-    this.scheduleDocCollection(docId, scan.keys);
+    this.scheduleDocCollection(rootId, scan.keys);
 
     return { updated, keys: scan.keys.length, missing: missingKeys.length };
   }
@@ -4240,8 +4765,22 @@ module.exports = class ZoteroCite extends Plugin {
   }
 
   /** 文末参考文献表：先清掉旧表，再追加。顺序与编号完全用样式给出的结果 */
-  async rebuildBibliography(docId, keys, rendered) {
-    const heading = resolveBibHeading(this.settings, rendered);
+  async rebuildBibliography(docId, keys, rendered, snapDocId, suppressHeading) {
+    let heading = resolveBibHeading(this.settings, rendered);
+    /*
+     * 1.3.0：多文档模式自动生成的输出文档，文档标题本身已经是 Reference / 参考文献，
+     * 再插一层「参考文献」小标题就是重复（用户 2026-11-08 23:43 截图实证）。
+     * 只在多文档模式生效 —— 单文档模式行为一字不改（34/34 回归是判据）。
+     */
+    if (suppressHeading && heading) {
+      try {
+        const r = await apiQuiet("/api/filetree/getHPathByID", { id: docId });
+        const name = String((r && r.data) || "").split("/").pop().trim();
+        if (name === REF_DOC_TITLE || LEGACY_BIB_HEADINGS.indexOf(name) >= 0) {
+          heading = "";
+        }
+      } catch (e) { /* 读不到就照旧 */ }
+    }
     /*
      * ⚠️ 不能用 SQL 的 sort 比较判断前后：思源 3.8.8 里多个块共享相同 sort 值
      * （h 与 p 都可能是 5 / 10 / 20），按 sort 过滤会误删正文。改用 getChildBlocks 的顺序。
@@ -4287,7 +4826,7 @@ module.exports = class ZoteroCite extends Plugin {
     let snapBib = null;
     let snapRec = null;
     if (list.some((k) => !String((rendered.bibByKey && rendered.bibByKey[k]) || "").trim())) {
-      snapRec = await readSnapshot(docId);
+      snapRec = await readSnapshot(snapDocId || docId);
       const items = (snapRec && snapRec.items) || {};
       snapBib = (k) => String((items[k] && items[k].bib) || "");
     }
@@ -4820,6 +5359,11 @@ return JSON.stringify({ok: !!s, title: s ? s.title : null});`);
             <label class="zc-field__label">活跃文档集合（Zotero 里自动建「【【Connected Documents】】→ 文档名」）</label>
             <input type="checkbox" data-k="docCollection">
           </div>
+          <div class="zc-field">
+            <div class="zc-field__label">多文档统一管理 · 按书籍分组</div>
+            <div class="zc-field__hint">每本书一组参数，点开下面的折叠块查看。在文档上右键「设为引文顶级文档」即可新增一组；不同书籍的章节层次可以不同，插件按各自的文档树自动识别。未指定输出文档时自动建 Reference 子文档。</div>
+            <div class="zc-scope-groups" data-scope-groups></div>
+          </div>
           <div class="zc-field__hint">打开文档或改动引用时，在 Zotero 里自动建一个以文档名命名的临时集合，收这篇文档引用到的全部文献；关闭文档时自动解散，顶级集合下没有别的文档了就一起收掉。成员只做「加进来 / 移出去」，<b>不会改动文献原本在你各集合里的归属</b>。顶级集合跨软件共用，WPS 插件建的集合也在它下面。关掉这个开关会把本机建过的集合收掉。</div>
         </div>
         <div class="zc-actions">
@@ -4951,6 +5495,8 @@ return JSON.stringify({ok: !!s, title: s ? s.title : null});`);
       });
     }
     this.updateStyleStat();
+    /* 1.3.0：按书籍分组的可折叠参数块要读文档树，异步填充 */
+    this.fillScopeGroups(root);
   }
 };
 
@@ -4967,4 +5513,11 @@ try {
   module.exports.__DOC_LEGACY_PARENTS = DOC_LEGACY_PARENTS;
   // 兼容旧测试的写法
   module.exports.__DOC_LEGACY_PARENT = DOC_LEGACY_PARENTS[0];
+  module.exports.__scopePathPrefix = scopePathPrefix;
+  module.exports.__isScopeDescendant = isScopeDescendant;
+  module.exports.__normalizeScopes = normalizeScopes;
+  module.exports.__orderScopeDocs = orderScopeDocs;
+  module.exports.__scopeFromRows = scopeFromRows;
+  module.exports.__SCOPE_FILE = SCOPE_FILE;
+  module.exports.__REF_DOC_TITLE = REF_DOC_TITLE;
 } catch (e) { /* 挂不上也不影响插件本体 */ }
